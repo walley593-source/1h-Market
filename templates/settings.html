@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Settings - BTC 1h</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen p-4 sm:p-8" x-data="settingsPage()" x-cloak>
+    <div class="max-w-4xl mx-auto">
+        <header class="flex flex-col sm:flex-row justify-between items-center mb-8 gap-4 text-center sm:text-left">
+            <h1 class="text-2xl sm:text-3xl font-bold text-violet-400 flex items-center gap-2">Settings <span class="text-[10px] sm:text-xs bg-violet-500 text-white px-2 py-0.5 rounded font-black tracking-wider">1H</span></h1>
+            <a href="/" class="w-full sm:w-auto bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded font-bold transition text-center">Back to Dashboard</a>
+        </header>
+
+        <form @submit.prevent="saveSettings" class="space-y-6 sm:space-y-8">
+            <!-- Mode & Balance -->
+            <div class="bg-gray-800 p-5 sm:p-6 rounded-lg shadow-lg">
+                <h2 class="text-lg sm:text-xl font-bold mb-4 border-b border-gray-700 pb-2">Trading Mode</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
+                    <div>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Mode</label>
+                        <select x-model="form.mode" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-violet-500 transition">
+                            <option value="paper">Paper Trading</option>
+                            <option value="live">Live Trading</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Initial Balance (USD)</label>
+                        <input type="number" x-model.number="form.paper_balance_usd" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-violet-500 transition">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Risk Management -->
+            <div class="bg-gray-800 p-5 sm:p-6 rounded-lg shadow-lg">
+                <h2 class="text-lg sm:text-xl font-bold mb-4 border-b border-gray-700 pb-2">Risk Management</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
+                    <div>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Risk Type</label>
+                        <select x-model="form.trading.risk_type" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-violet-500 transition">
+                            <option value="fixed">Fixed Amount ($)</option>
+                            <option value="percent">Percentage of Balance (%)</option>
+                        </select>
+                        <p class="text-[10px] text-gray-500 mt-2 italic">Fixed = flat $ per trade. Percent = % of balance.</p>
+                    </div>
+                    <div>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Risk Value</label>
+                        <input type="number" step="0.01" x-model.number="form.trading.risk_value" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-violet-500 transition">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Markets -->
+            <div class="bg-gray-800 p-5 sm:p-6 rounded-lg shadow-lg">
+                <h2 class="text-lg sm:text-xl font-bold mb-4 border-b border-gray-700 pb-2">Market Configuration</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
+                    <div>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Binance Symbol</label>
+                        <input type="text" x-model="form.trading.symbol" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-violet-500 transition" placeholder="BTCUSDT">
+                    </div>
+                    <div>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Polymarket Series</label>
+                        <select x-model="form.polymarket.series_id" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-violet-500 transition">
+                            <template x-for="s in availableSeries" :key="s.series_id">
+                                <option :value="s.series_id" x-text="s.title" :selected="s.series_id == form.polymarket.series_id"></option>
+                            </template>
+                        </select>
+                        <p class="text-[10px] text-gray-500 mt-2 italic" x-show="!availableSeries.length">No series found or loading...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Strategy Controls -->
+            <div class="bg-gray-800 p-5 sm:p-6 rounded-lg shadow-lg">
+                <h2 class="text-lg sm:text-xl font-bold mb-4 border-b border-gray-700 pb-2">1h Strategy Controls</h2>
+                <p class="text-[10px] text-gray-500 mb-4 italic">BUY when price is <strong>above the 1h open</strong> and the <strong>5m Heiken-Ashi is green</strong>; SELL when <strong>below the open</strong> and <strong>HA red</strong>. A new opposite signal flips the position. That's the whole strategy — nothing else to tune.</p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mb-4">
+                    <div class="p-4 bg-gray-900/50 rounded-lg border border-gray-700">
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" x-model="form.entry.flip_on_signal" class="w-4 h-4">
+                            <span class="text-sm font-bold text-violet-400 uppercase">Flip on Opposite Signal</span>
+                        </label>
+                        <p class="text-[10px] text-gray-500 mt-2 italic">When on, a new SELL closes a BUY (and vice versa). Turn OFF to hold to expiry.</p>
+                    </div>
+                    <div>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Min Book Liquidity ($)</label>
+                        <input type="number" step="1" min="0" x-model.number="form.entry.min_book_liquidity_usd" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-violet-500 transition">
+                        <p class="text-[10px] text-gray-500 mt-2 italic">Skip if the ask side can't absorb the stake (e.g. 20).</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Secrets -->
+            <div class="bg-gray-800 p-5 sm:p-6 rounded-lg shadow-lg">
+                <h2 class="text-lg sm:text-xl font-bold mb-4 border-b border-gray-700 pb-2">Credentials & Live Trading</h2>
+                <div class="space-y-4 sm:space-y-6">
+                    <div>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Private Key or Seed Phrase</label>
+                        <div class="flex flex-col sm:flex-row gap-2">
+                            <input type="password" x-model="form.private_key" class="flex-1 bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-violet-500 transition" placeholder="0x... private key  —or—  twelve word seed phrase">
+                            <button type="button" @click="testCredentials" :disabled="testBusy"
+                                    class="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold py-3 px-5 rounded-lg transition text-sm whitespace-nowrap flex items-center justify-center gap-2">
+                                <svg x-show="testBusy" class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                                </svg>
+                                <span x-text="testBusy ? 'Testing…' : 'Test'"></span>
+                            </button>
+                        </div>
+                        <p class="text-[10px] text-gray-500 mt-2 italic">EOA only. Paste a hex private key OR a 12/24-word seed phrase — the wallet is derived from it. Only the derived key is stored; the seed phrase is never written to disk. <strong>Test</strong> saves, derives the wallet address and checks the connection.</p>
+                        <p x-show="testResult" x-transition class="text-xs mt-2 font-mono break-all"
+                           :class="testOk ? 'text-green-400' : 'text-red-400'" x-text="testResult"></p>
+                    </div>
+                    <div>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Relayer API Key</label>
+                        <input type="password" x-model="form.relayer.api_key" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-violet-500 transition" placeholder="Polymarket relayer API key (Settings → Relayer API keys)">
+                        <p class="text-[10px] text-gray-500 mt-2 italic">Sponsors gas for on-chain setup (deposit-wallet deploy + approvals) so you never pay gas. Get it from polymarket.com → Settings → Relayer API keys. The key's owner address is derived from your wallet automatically.</p>
+                    </div>
+                    <div>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Alchemy RPC API Key</label>
+                        <input type="password" x-model="form.chainlink.alchemy_api_key" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-violet-500 transition" placeholder="Alchemy Polygon API key (optional, for on-chain reads)">
+                        <p class="text-[10px] text-gray-500 mt-2 italic">Optional. Used for on-chain reads/setup; leave blank to use public RPCs.</p>
+                    </div>
+                    <p class="text-[10px] text-gray-500 italic">Live mode places real Fill-Or-Kill orders on Polymarket CLOB V2. Your key/seed only <strong>signs</strong> orders (holds no funds or gas); funds live in your Polymarket deposit wallet, and the relayer pays gas. The one-time on-chain approvals are set automatically (gaslessly) before your first live order.</p>
+                </div>
+            </div>
+
+            <div class="flex justify-center sm:justify-end">
+                <button type="submit" class="w-full sm:w-auto bg-violet-600 hover:bg-violet-500 text-white font-black py-4 px-12 rounded-xl shadow-xl transition transform active:scale-95 duration-200">
+                    SAVE CHANGES
+                </button>
+            </div>
+        </form>
+
+        <div x-show="message" x-transition x-text="message" class="fixed bottom-8 left-1/2 -translate-x-1/2 w-[90%] max-w-md p-4 rounded-lg text-center font-bold shadow-2xl z-50"
+             :class="messageType === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'"></div>
+    </div>
+
+    <script>
+        function settingsPage() {
+            return {
+                form: {
+                    mode: 'paper',
+                    paper_balance_usd: 1000,
+                    private_key: '',
+                    polymarket: { series_id: '' },
+                    trading: { symbol: '', risk_type: 'percent', risk_value: 10 },
+                    entry: { flip_on_signal: true, min_book_liquidity_usd: 20.0 },
+                    chainlink: { alchemy_api_key: '' },
+                    relayer: { api_key: '' }
+                },
+                message: '',
+                messageType: '',
+                availableSeries: [],
+                testBusy: false,
+                testResult: '',
+                testOk: false,
+                async init() {
+                    try {
+                        const [res, sRes] = await Promise.all([
+                            fetch('/api/settings').then(r => r.json()),
+                            fetch('/api/available-series').then(r => r.json())
+                        ]);
+                        this.form = res;
+                        this.availableSeries = sRes;
+                    } catch (e) {
+                        console.error("Failed to load settings", e);
+                    }
+                },
+                async saveSettings() {
+                    try {
+                        const res = await fetch('/api/settings', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(this.form)
+                        });
+                        if (res.ok) {
+                            this.message = "Settings Saved Successfully!";
+                            this.messageType = 'success';
+                            setTimeout(() => this.message = '', 3000);
+                        } else {
+                            throw new Error("Failed to save");
+                        }
+                    } catch (e) {
+                        this.message = "Error Saving Settings";
+                        this.messageType = 'error';
+                        setTimeout(() => this.message = '', 3000);
+                    }
+                },
+                async testCredentials() {
+                    this.testBusy = true;
+                    this.testResult = '';
+                    try {
+                        // Save first so the entered key/seed is stored and the CLOB client re-inits.
+                        await fetch('/api/settings', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(this.form)
+                        });
+                        const res = await fetch('/api/test-credentials', { method: 'POST' });
+                        const d = await res.json();
+                        if (d.ok) {
+                            this.testOk = true;
+                            const stName = {0:'EOA',1:'proxy',2:'safe',3:'deposit'}[d.chosen_signature_type] || d.chosen_signature_type;
+                            const funded = (d.wallets || []).filter(w => w.pusd_balance > 0)
+                                .map(w => '$' + Number(w.pusd_balance).toFixed(2) + ' in ' + w.address.slice(0,8) + '…');
+                            this.testResult = 'Active ✓  EOA ' + d.eoa +
+                                '  ·  trading wallet (' + stName + ') ' + d.funder +
+                                '  ·  relayer key ' + (d.relayer_key_set ? 'set' : 'MISSING') +
+                                (funded.length ? ('  ·  funds: ' + funded.join(', ')) : '  ·  no pUSD found yet — deposit on polymarket.com');
+                        } else {
+                            this.testOk = false;
+                            this.testResult = 'Failed: ' + (d.error || 'unknown') +
+                                (d.eoa ? ('  (EOA ' + d.eoa + ')') : '');
+                        }
+                    } catch (e) {
+                        this.testOk = false;
+                        this.testResult = 'Test request failed';
+                    }
+                    this.testBusy = false;
+                }
+            }
+        }
+    </script>
+</body>
+</html>
