@@ -806,7 +806,7 @@ async def get_logs():
 
 @app.get("/api/available-series")
 async def get_available_series():
-    return await data.fetch_available_15m_series()
+    return await data.fetch_available_hourly_series()
 
 @app.get("/api/settings")
 async def get_settings():
