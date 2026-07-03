@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
     # Start all background tasks
     tasks = [
         asyncio.create_task(binance_stream.start()),
-        asyncio.create_task(binance_kline_5m.start()),
+        asyncio.create_task(binance_kline_15m.start()),
         asyncio.create_task(polymarket_ws_stream.start()),
         asyncio.create_task(chainlink_ws_stream.start()),
         asyncio.create_task(update_loop())
@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI):
     # (Cancelling without awaiting leaves sessions open -> aiohttp's "Unclosed client
     # session" warning at garbage-collection.)
     binance_stream.close()
-    binance_kline_5m.close()
+    binance_kline_15m.close()
     polymarket_ws_stream.close()
     chainlink_ws_stream.close()
 
@@ -86,16 +86,15 @@ state = {
     "active_trades": [],
     "trade_history": [],
     "logs": [],
-    "last_trade_side": None,
     "last_balance_refresh": 0,
     "running": False,  # trading is off until the user presses Start on the dashboard
-    "window_marks": {},  # market_id -> {open, open_ts, last, last_ts}: Chainlink 15m open/close
-    "entered_markets": []  # market_ids already traded — ONE fresh entry per 15m window (flips excepted)
+    "window_marks": {},  # market_id -> {open, open_ts, last, last_ts}: Chainlink 1h open/close
+    "entered_markets": []  # market_ids already traded — ONE fresh entry per 1h window (flips excepted)
 }
 
 def _mark_window_entered(market_id):
     """Record that a window (market) has had a position, so it can't be re-entered this
-    15m window (one entry per window). Bounded to the most recent 100."""
+    1h window (one entry per window). Bounded to the most recent 100."""
     mid = str(market_id)
     if mid not in state["entered_markets"]:
         state["entered_markets"].append(mid)
@@ -108,7 +107,6 @@ def save_state():
             "paper_balance": state["paper_balance"],
             "active_trades": state["active_trades"],
             "trade_history": state["trade_history"],
-            "last_trade_side": state["last_trade_side"],
             "window_marks": state["window_marks"],
             "entered_markets": state["entered_markets"]
         }
@@ -132,7 +130,6 @@ def load_state():
                 state["paper_balance"] = loaded.get("paper_balance", settings.PAPER_BALANCE_USD)
                 state["active_trades"] = loaded.get("active_trades", [])
                 state["trade_history"] = loaded.get("trade_history", [])
-                state["last_trade_side"] = loaded.get("last_trade_side")
                 state["window_marks"] = loaded.get("window_marks", {})
                 state["entered_markets"] = loaded.get("entered_markets", [])
                 log_message("State loaded from state_data.json")
@@ -172,7 +169,7 @@ def merge_live_close(klines: List[Dict], spot: Optional[float]) -> List[Dict]:
 
 # Background task instances
 binance_stream = ws_data.BinanceTradeStream(symbol=settings.SYMBOL)
-binance_kline_5m = ws_data.BinanceKlineStream(symbol=settings.SYMBOL, interval="5m", limit=200)
+binance_kline_15m = ws_data.BinanceKlineStream(symbol=settings.SYMBOL, interval="15m", limit=200)
 
 polymarket_ws_stream = ws_data.PolymarketChainlinkStream(
     ws_url=settings.POLYMARKET_LIVE_DATA_WS_URL,
@@ -301,12 +298,12 @@ async def execute_trade(decision: Dict[str, Any], market_prices: Dict[str, Any],
             return "flip_close_failed"
         log_message(f"FLIP on new signal: {running_here['side']} -> {side}")
     else:
-        # FRESH entry — ONE per 15m window. If this window already had a position (incl.
-        # one closed early on a 1m reversal), block re-entry until the next market.
+        # FRESH entry — ONE per 1h window. If this window already had a position,
+        # block re-entry until the next market.
         if str(market.get("id")) in state["entered_markets"]:
             return "window_done"
 
-    # CONSTRAINT: one *running* position at a time. A trade whose 15m window has already
+    # CONSTRAINT: one *running* position at a time. A trade whose 1h window has already
     # ended (only awaiting Polymarket's resolution) no longer blocks a new entry — the next
     # market is already live, so we can trade it while the old one settles in the background.
     if any(now_ts < (t.get("end_ts") or float("inf")) for t in state["active_trades"]):
@@ -346,7 +343,6 @@ async def _close_position(trade: Dict[str, Any], market_prices: Optional[Dict[st
     trade["profit_loss"] = (trade["shares"] * exit_price) - trade["amount"]
     state["trade_history"].append(trade)
     state["active_trades"] = [t for t in state["active_trades"] if t is not trade]
-    state["last_trade_side"] = None
     save_state()
     log_message(f"CLOSE ({reason}): {trade['side']} @ {exit_price:.2f} (P/L ${trade['profit_loss']:.2f})")
     return True
@@ -418,7 +414,6 @@ async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[
     if state["trading_mode"] == "paper":
         state["paper_balance"] -= amount_to_risk
         state["active_trades"].append(trade)
-        state["last_trade_side"] = side
         _mark_window_entered(market["id"])
         save_state()
 
@@ -440,7 +435,6 @@ async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[
             trade["order_id"] = order_id
             trade["order_response"] = resp
             state["active_trades"].append(trade)
-            state["last_trade_side"] = side
             _mark_window_entered(market["id"])
             save_state()
             log_message(f"Executed LIVE trade: {side} ${amount_to_risk:.2f} on {market.get('slug')} (order {order_id})")
@@ -602,9 +596,9 @@ async def update_trades(current_prices: Dict[str, Any]):
 
 async def seed_kline_buffers():
     try:
-        k5m = await data.fetch_klines(settings.SYMBOL, "5m", 200)
-        binance_kline_5m.set_candles(k5m)
-        log_message(f"Seeded Binance 5m kline buffer for {settings.SYMBOL}")
+        k15m = await data.fetch_klines(settings.SYMBOL, "15m", 200)
+        binance_kline_15m.set_candles(k15m)
+        log_message(f"Seeded Binance 15m kline buffer for {settings.SYMBOL}")
     except Exception as e:
         log_message(f"Failed to seed kline buffers: {e}")
 
@@ -639,17 +633,17 @@ async def update_loop():
 
             spot_price = binance_ws.get("price") if binance_ws and binance_ws.get("price") else last_price
 
-            # Fold the live @trade websocket tick into the forming 1m candle so the
-            # indicators (HA, RSI, AO) are computed in real time off live data, not just
-            # on the slower kline-WS candle pushes.
-            klines_5m = merge_live_close(binance_kline_5m.get_candles(), spot_price)
+            # Fold the live @trade websocket tick into the forming 15m candle so the
+            # Heiken-Ashi is computed in real time off live data, not just on the
+            # slower kline-WS candle pushes.
+            klines_15m = merge_live_close(binance_kline_15m.get_candles(), spot_price)
 
             # Window open price (the strike) — recorded on each trade for reference.
-            # The 15m window start is also a 1m boundary, so take the 1m candle at it.
+            # The 1h window start is also a 15m boundary, so take the 15m candle at it.
             target_open = spot_price
-            if klines_5m:
+            if klines_15m:
                 start_ms = timing["startMs"]
-                for c in reversed(klines_5m):
+                for c in reversed(klines_15m):
                     if c["openTime"] <= start_ms:
                         target_open = c["open"]
                         break
@@ -667,7 +661,7 @@ async def update_loop():
                 current_price = chainlink_data["price"]
                 price_source = "Chainlink RPC REST"
 
-            # ── Mark the 15m window's Chainlink OPEN/CLOSE ───────────────────────
+            # ── Mark the 1h window's Chainlink OPEN/CLOSE ────────────────────────
             # Polymarket settles BTC Up/Down on Chainlink. A market becomes the live
             # window exactly at its start, so the FIRST time we see it we snapshot the
             # open; every later tick refreshes "last" (which freezes at ~window end,
@@ -694,15 +688,15 @@ async def update_loop():
 
             time_left_min = (settlement_ms - time.time() * 1000) / 60_000 if settlement_ms else timing["remainingMinutes"]
 
-            # 5m Heiken-Ashi streak {color, count} — the direction signal.
-            consec = indicators.count_consecutive(indicators.compute_heiken_ashi(klines_5m))
+            # 15m Heiken-Ashi streak {color, count} — the direction signal.
+            consec = indicators.count_consecutive(indicators.compute_heiken_ashi(klines_15m))
 
             market_up = poly_snapshot["prices"]["up"] if poly_snapshot["ok"] else None
             market_down = poly_snapshot["prices"]["down"] if poly_snapshot["ok"] else None
 
             # ── PERSISTENCE: current price vs the 1h window OPEN. above => UP, below => DOWN.
             # Prefer the CHAINLINK open (what Polymarket settles on) when it was snapshotted
-            # at the window start (open_ts near it); else fall back to the BINANCE 5m hour
+            # at the window start (open_ts near it); else fall back to the BINANCE 15m hour
             # open (`target_open`, always available from the seeded klines). Same feed each
             # branch = no cross-feed offset.
             window_open = None
@@ -717,11 +711,11 @@ async def update_loop():
                 elif target_open and spot_price:
                     window_open, above_open, open_source = target_open, (spot_price > target_open), "binance"
 
-            # ── ENTRY (simple): BUY if price ABOVE the 1h open AND 5m HA green; SELL if
-            # ── price BELOW AND 5m HA red. A new opposite signal flips the position.
+            # ── ENTRY (simple): BUY if price ABOVE the 1h open AND 15m HA green; SELL if
+            # ── price BELOW AND 15m HA red. A new opposite signal flips the position.
             decision = engines.decide_entry({
                 "aboveOpen": above_open,        # price vs the 1h open (persistence)
-                "ha5Color": consec["color"],    # 5m Heiken-Ashi colour
+                "ha15Color": consec["color"],   # 15m Heiken-Ashi colour
                 "priceUp": market_up,
                 "priceDown": market_down,
             })
@@ -779,7 +773,7 @@ async def update_loop():
                     "poly_down": market_down
                 },
                 "indicators": {
-                    "heiken_5m": consec,
+                    "heiken_15m": consec,
                     "vs_open": {"window_open": window_open, "above_open": above_open, "source": open_source}
                 },
                 "analysis": {
@@ -850,7 +844,7 @@ async def get_settings():
 
 @app.post("/api/settings")
 async def post_settings(new_settings: Dict[str, Any]):
-    global binance_stream, polymarket_ws_stream, chainlink_ws_stream, binance_kline_5m
+    global binance_stream, polymarket_ws_stream, chainlink_ws_stream, binance_kline_15m
     old_symbol = settings.SYMBOL
 
     # Credential may be a hex private key OR a 12/24-word seed phrase. We persist
@@ -934,9 +928,9 @@ async def post_settings(new_settings: Dict[str, Any]):
         binance_stream = ws_data.BinanceTradeStream(symbol=settings.SYMBOL)
         asyncio.create_task(binance_stream.start())
 
-        binance_kline_5m.close()
-        binance_kline_5m = ws_data.BinanceKlineStream(symbol=settings.SYMBOL, interval="5m", limit=200)
-        asyncio.create_task(binance_kline_5m.start())
+        binance_kline_15m.close()
+        binance_kline_15m = ws_data.BinanceKlineStream(symbol=settings.SYMBOL, interval="15m", limit=200)
+        asyncio.create_task(binance_kline_15m.start())
 
         await seed_kline_buffers()
 

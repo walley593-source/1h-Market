@@ -1,7 +1,7 @@
 import os
 import json
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List, Dict, Any, Optional
+from typing import List, Dict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
@@ -36,16 +36,15 @@ class Settings(BaseSettings):
     RISK_TYPE: str = "percent"
     RISK_VALUE: float = 10.0
 
-    # ── Entry (simple): price vs the 1h open + 5m Heiken-Ashi colour ──────────────
-    # BUY when price ABOVE the 1h open AND HA(5m) green; SELL when BELOW AND HA red.
+    # ── Entry (simple): price vs the 1h open + 15m Heiken-Ashi colour ─────────────
+    # BUY when price ABOVE the 1h open AND HA(15m) green; SELL when BELOW AND HA red.
     # Close-and-flip on the opposite signal (a new SELL closes a BUY, and vice versa).
     FLIP_ON_SIGNAL_ENABLED: bool = True
     MIN_BOOK_LIQUIDITY_USD: float = 20.0  # skip if the ask side can't absorb the stake
 
     # Polymarket
     POLYMARKET_SLUG: str = os.getenv("POLYMARKET_SLUG", "")
-    POLYMARKET_SERIES_ID: str = os.getenv("POLYMARKET_SERIES_ID", "10192")
-    POLYMARKET_SERIES_SLUG: str = os.getenv("POLYMARKET_SERIES_SLUG", "btc-up-or-down-15m")
+    POLYMARKET_SERIES_ID: str = os.getenv("POLYMARKET_SERIES_ID", "10114")
     POLYMARKET_AUTO_SELECT_LATEST: bool = os.getenv("POLYMARKET_AUTO_SELECT_LATEST", "true").lower() == "true"
     POLYMARKET_LIVE_DATA_WS_URL: str = os.getenv("POLYMARKET_LIVE_WS_URL", "wss://ws-live-data.polymarket.com")
     POLYMARKET_UP_LABEL: str = os.getenv("POLYMARKET_UP_LABEL", "Up")
@@ -122,7 +121,6 @@ def load_settings():
                 if "clob_base_url" in poly: base_settings.CLOB_BASE_URL = poly["clob_base_url"]
                 if "live_ws_url" in poly: base_settings.POLYMARKET_LIVE_DATA_WS_URL = poly["live_ws_url"]
                 if "series_id" in poly: base_settings.POLYMARKET_SERIES_ID = poly["series_id"]
-                if "series_slug" in poly: base_settings.POLYMARKET_SERIES_SLUG = poly["series_slug"]
                 if "auto_select_latest" in poly: base_settings.POLYMARKET_AUTO_SELECT_LATEST = poly["auto_select_latest"]
                 if "up_label" in poly: base_settings.POLYMARKET_UP_LABEL = poly["up_label"]
                 if "down_label" in poly: base_settings.POLYMARKET_DOWN_LABEL = poly["down_label"]

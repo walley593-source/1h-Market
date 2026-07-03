@@ -109,9 +109,9 @@
                 <h3 class="text-lg sm:text-xl font-bold mb-4 border-b border-gray-700 pb-2">Signals</h3>
                 <div class="space-y-4">
                     <div class="flex justify-between text-sm sm:text-base">
-                        <span class="text-gray-400">Heiken Ashi (5m)</span>
-                        <span :class="data.indicators?.heiken_5m?.color === 'green' ? 'text-green-400' : (data.indicators?.heiken_5m?.color === 'red' ? 'text-red-400' : 'text-gray-500')"
-                              x-text="data.indicators?.heiken_5m?.count != null ? (data.indicators?.heiken_5m?.color + ' x' + data.indicators?.heiken_5m?.count) : '—'"></span>
+                        <span class="text-gray-400">Heiken Ashi (15m)</span>
+                        <span :class="data.indicators?.heiken_15m?.color === 'green' ? 'text-green-400' : (data.indicators?.heiken_15m?.color === 'red' ? 'text-red-400' : 'text-gray-500')"
+                              x-text="data.indicators?.heiken_15m?.count != null ? (data.indicators?.heiken_15m?.color + ' x' + data.indicators?.heiken_15m?.count) : '—'"></span>
                     </div>
                     <div class="flex justify-between text-sm sm:text-base">
                         <span class="text-gray-400">Price vs 1h Open <span class="text-[9px] text-gray-600 uppercase" x-text="data.indicators?.vs_open?.source ? ('· ' + data.indicators.vs_open.source) : ''"></span></span>

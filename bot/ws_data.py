@@ -7,7 +7,7 @@ from .config import settings
 from .net_utils import get_proxy_url_for
 
 class BinanceTradeStream:
-    """Fast spot-price feed from Binance @trade — the leading signal for fair_prob."""
+    """Fast spot-price feed from Binance @trade — the live tick folded into the forming candle."""
     def __init__(self, symbol: str, on_update: Optional[Callable] = None):
         self.symbol = symbol.lower()
         self.on_update = on_update

@@ -10,7 +10,6 @@
     "clob_base_url": "https://clob.polymarket.com",
     "live_ws_url": "wss://ws-live-data.polymarket.com",
     "series_id": "10114",
-    "series_slug": "btc-up-or-down-hourly",
     "auto_select_latest": true,
     "up_label": "Up",
     "down_label": "Down"
