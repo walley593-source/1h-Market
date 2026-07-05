@@ -1,14 +1,3 @@
-# Polymarket BTC **1h** Assistant (Python FastAPI)
-
-The simple **1-hour** variant (violet UI, **port 8100**, series `10114` = BTC Up or Down
-Hourly). **BUY** when price is above the 1h open and the **5m Heiken-Ashi** is green;
-**SELL** when below the open and HA red; a new opposite signal flips the position. Nothing
-else — see [`strategy.md`](strategy.md).
-
----
-
-_(the original 15m text below is left for reference; the strategy above is what this build runs)_
-
 # Polymarket BTC 15m Assistant (Python FastAPI)
 
 A real-time trading assistant for Polymarket **"Bitcoin Up or Down" 15-minute** markets, ported to Python and FastAPI.
@@ -114,6 +103,22 @@ price is the current market quote plus a small buffer (`CLOB_MAX_SLIPPAGE`, defa
 2¢), so if the book moves away the order is killed rather than filled at a bad
 price. In live mode the dashboard balance reflects the real **deposit-wallet balance**
 (refreshed periodically). Order failures are reported in the Console Log.
+
+## Machine Learning (shadow mode)
+
+The `bot/ml/` package adds a calibrated win-probability model that runs **in shadow**:
+it is logged and displayed (dashboard "ML P(up) · shadow") but makes **no trading
+decisions**. Promotion into the decision path requires it to beat the market's ask
+on calibration over 3-4 weeks of recorded live odds.
+
+- `python -m bot.ml.data [days]` — build the offline dataset from Binance 1m history
+  (resumable; cached under `models/`)
+- `python -m bot.ml.train` — walk-forward train/evaluate (logistic + monotonic
+  gradient boosting vs the closed-form GBM baseline), then save `models/model.joblib`
+- `python -m bot.ml.backtest_gates` — the gate-stack win-rate backtest
+- `bot/recorder.py` — logs features + live Polymarket bid/ask + shadow P(up) every
+  tick to `logs/ml/` (this accumulating dataset is the only way to ever validate a
+  model against the market's price — keep the bot running to collect it)
 
 ## Safety
 

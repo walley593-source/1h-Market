@@ -1,7 +1,7 @@
 import os
 import json
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List, Dict
+from typing import List, Dict, Any, Optional
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
@@ -25,26 +25,73 @@ class Settings(BaseSettings):
     CLOB_NEG_RISK_ADAPTER_ADDRESS: str = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 
     SYMBOL: str = "BTCUSDT"
-    BINANCE_BASE_URL: str = "https://api.binance.com"
+    # data-api.binance.vision = official market-data mirror; api.binance.com
+    # geo-blocks (HTTP 451) in some regions and this bot only needs market data.
+    BINANCE_BASE_URL: str = "https://data-api.binance.vision"
     GAMMA_BASE_URL: str = "https://gamma-api.polymarket.com"
     CLOB_BASE_URL: str = "https://clob.polymarket.com"
 
     POLL_INTERVAL_MS: int = 1000
-    CANDLE_WINDOW_MINUTES: int = 60   # 1-hour market
+    CANDLE_WINDOW_MINUTES: int = 15
 
     # Risk per trade: "percent" = RISK_VALUE% of balance; "fixed" = RISK_VALUE dollars.
     RISK_TYPE: str = "percent"
     RISK_VALUE: float = 10.0
 
-    # ── Entry (simple): price vs the 1h open + 15m Heiken-Ashi colour ─────────────
-    # BUY when price ABOVE the 1h open AND HA(15m) green; SELL when BELOW AND HA red.
-    # Close-and-flip on the opposite signal (a new SELL closes a BUY, and vice versa).
-    FLIP_ON_SIGNAL_ENABLED: bool = True
+    # ── Entry price gates ───────────────────────────────────────────────────────
+    # After 1m HA + 1m AO + RSI(50) confirm the side and price action (price vs the 15m
+    # open) agrees, the ask must be below the cap. Purely technical — no probability model.
+    MAX_ENTRY_PRICE: float = 0.60       # skip if the side's odds (ask price) are >= this
     MIN_BOOK_LIQUIDITY_USD: float = 20.0  # skip if the ask side can't absorb the stake
+
+    # ── Win-rate gates (from the 30d Binance 1m backtest, 2026-07-03) ───────────
+    # Entering early or on a hair-thin lead is a coin flip; the same signals win far
+    # more when the window has developed and the lead is real:
+    #   entry minute 1-2 -> 64% win;  >=5 -> 78%;  >=9 -> 86%
+    #   lead <2 bps -> ~55% win;  >=3 bps -> 62%+;  >=12 bps -> 76-90%
+    # Defaults = the balanced tier: minute >=5 + lead >=3 bps ~ 82% win, ~18 trades/day.
+    MIN_ENTRY_ELAPSED_MIN: float = 5.0  # no entries before this many elapsed minutes
+    MIN_LEAD_BPS: float = 3.0           # |price - window open| must be >= this (bps of price)
+
+    # ── Strategy selection ──────────────────────────────────────────────────────
+    # "model" = the calibrated ML win-probability drives entries (indicator/timing/lead
+    #           gates SUBSUMED into features; fixed price cap REPLACED by the EV gate).
+    # "gates" = the purely-technical hand-gate stack (fallback / A-B).
+    STRATEGY_MODE: str = "model"
+    MODEL_MIN_CONF: float = 0.80        # min P(chosen side) to enter (backtest: ~86% win)
+    MODEL_EV_MARGIN: float = 0.02       # required edge = P(side) - ask, covers spread/slippage
+    # Sizing in model mode: fractional Kelly on (P, ask), capped at the RISK_VALUE stake.
+    MODEL_KELLY_FRACTION: float = 0.25  # quarter-Kelly (0 = flat RISK_VALUE sizing)
+
+    # ── ML EXIT (model mode) — decide_exit, driven by the SAME calibrated P(up) ──
+    # The exit is the mirror of the entry: sell the held side when the market's bid
+    # overpays vs the model's fair value (take-profit) or the model's win prob collapses
+    # (stop). EXIT_MODE gates whether it TRADES:
+    #   "off"    — never exit early; hold every position to expiry (backtest-preferred).
+    #   "shadow" — LOG would-sell decisions (bid + prob + outcome) but DON'T act, so the
+    #              exit can be validated against hold-to-expiry before trusting it.
+    #   "live"   — actually sell when decide_exit says SELL.
+    # Default "shadow": prior backtests showed early exits LOSE to holding, so the ML
+    # exit must prove itself in shadow before it may act.
+    EXIT_MODE: str = "shadow"
+    EXIT_TAKE_PROFIT_MARGIN: float = 0.03  # sell if held bid - P(side win) >= this
+    EXIT_STOP_PROB: float = 0.0            # sell if P(side win) < this (0 = stop disabled)
+
+    # Entry gates (all mandatory): 1m HA direction (colour) + Awesome Oscillator(1m,
+    # bar colour rising=green) + RSI(50) + price-vs-open (price action).
+
+    # Close-on-reversal: CLOSE (do not reverse) a running position when the 1m HA AND the
+    # 1m AO both flip against it for >= CLOSE_REVERSAL_BARS consecutive bars. Only closes
+    # the position — never opens the opposite side. Also locks the window (one entry/window).
+    CLOSE_ON_REVERSAL_ENABLED: bool = False
+    CLOSE_REVERSAL_BARS: int = 3   # require the 1m HA & 1m AO reversal to hold >= this many bars
+
+    RSI_PERIOD: int = 14
 
     # Polymarket
     POLYMARKET_SLUG: str = os.getenv("POLYMARKET_SLUG", "")
-    POLYMARKET_SERIES_ID: str = os.getenv("POLYMARKET_SERIES_ID", "10114")
+    POLYMARKET_SERIES_ID: str = os.getenv("POLYMARKET_SERIES_ID", "10192")
+    POLYMARKET_SERIES_SLUG: str = os.getenv("POLYMARKET_SERIES_SLUG", "btc-up-or-down-15m")
     POLYMARKET_AUTO_SELECT_LATEST: bool = os.getenv("POLYMARKET_AUTO_SELECT_LATEST", "true").lower() == "true"
     POLYMARKET_LIVE_DATA_WS_URL: str = os.getenv("POLYMARKET_LIVE_WS_URL", "wss://ws-live-data.polymarket.com")
     POLYMARKET_UP_LABEL: str = os.getenv("POLYMARKET_UP_LABEL", "Up")
@@ -121,6 +168,7 @@ def load_settings():
                 if "clob_base_url" in poly: base_settings.CLOB_BASE_URL = poly["clob_base_url"]
                 if "live_ws_url" in poly: base_settings.POLYMARKET_LIVE_DATA_WS_URL = poly["live_ws_url"]
                 if "series_id" in poly: base_settings.POLYMARKET_SERIES_ID = poly["series_id"]
+                if "series_slug" in poly: base_settings.POLYMARKET_SERIES_SLUG = poly["series_slug"]
                 if "auto_select_latest" in poly: base_settings.POLYMARKET_AUTO_SELECT_LATEST = poly["auto_select_latest"]
                 if "up_label" in poly: base_settings.POLYMARKET_UP_LABEL = poly["up_label"]
                 if "down_label" in poly: base_settings.POLYMARKET_DOWN_LABEL = poly["down_label"]
@@ -136,8 +184,25 @@ def load_settings():
 
             if "entry" in config_data:
                 en = config_data["entry"]
+                if "max_price" in en: base_settings.MAX_ENTRY_PRICE = float(en["max_price"])
                 if "min_book_liquidity_usd" in en: base_settings.MIN_BOOK_LIQUIDITY_USD = float(en["min_book_liquidity_usd"])
-                if "flip_on_signal" in en: base_settings.FLIP_ON_SIGNAL_ENABLED = bool(en["flip_on_signal"])
+                if "min_entry_minute" in en: base_settings.MIN_ENTRY_ELAPSED_MIN = float(en["min_entry_minute"])
+                if "min_lead_bps" in en: base_settings.MIN_LEAD_BPS = float(en["min_lead_bps"])
+
+            if "strategy" in config_data:
+                st = config_data["strategy"]
+                if "mode" in st: base_settings.STRATEGY_MODE = st["mode"]
+                if "model_min_conf" in st: base_settings.MODEL_MIN_CONF = float(st["model_min_conf"])
+                if "model_ev_margin" in st: base_settings.MODEL_EV_MARGIN = float(st["model_ev_margin"])
+                if "model_kelly_fraction" in st: base_settings.MODEL_KELLY_FRACTION = float(st["model_kelly_fraction"])
+                if "exit_mode" in st: base_settings.EXIT_MODE = st["exit_mode"]
+                if "exit_take_profit_margin" in st: base_settings.EXIT_TAKE_PROFIT_MARGIN = float(st["exit_take_profit_margin"])
+                if "exit_stop_prob" in st: base_settings.EXIT_STOP_PROB = float(st["exit_stop_prob"])
+
+            if "close_on_reversal" in config_data:
+                cor = config_data["close_on_reversal"]
+                if "enabled" in cor: base_settings.CLOSE_ON_REVERSAL_ENABLED = bool(cor["enabled"])
+                if "bars" in cor: base_settings.CLOSE_REVERSAL_BARS = int(cor["bars"])
 
             if "chainlink" in config_data:
                 cl = config_data["chainlink"]

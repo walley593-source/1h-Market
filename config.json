@@ -9,27 +9,43 @@
     "gamma_base_url": "https://gamma-api.polymarket.com",
     "clob_base_url": "https://clob.polymarket.com",
     "live_ws_url": "wss://ws-live-data.polymarket.com",
-    "series_id": "10114",
+    "series_id": "10192",
+    "series_slug": "btc-up-or-down-15m",
     "auto_select_latest": true,
     "up_label": "Up",
     "down_label": "Down"
   },
   "trading": {
     "symbol": "BTCUSDT",
-    "binance_base_url": "https://api.binance.com",
-    "candle_window_minutes": 60,
+    "binance_base_url": "https://data-api.binance.vision",
+    "candle_window_minutes": 15,
     "poll_interval_ms": 1000,
     "risk_type": "percent",
     "risk_value": 10
   },
   "entry": {
-    "flip_on_signal": true,
-    "min_book_liquidity_usd": 20
+    "max_price": 0.8,
+    "min_book_liquidity_usd": 20,
+    "min_entry_minute": 5,
+    "min_lead_bps": 3
+  },
+  "strategy": {
+    "mode": "model",
+    "model_min_conf": 0.8,
+    "model_ev_margin": 0.02,
+    "model_kelly_fraction": 0.25,
+    "exit_mode": "shadow",
+    "exit_take_profit_margin": 0.03,
+    "exit_stop_prob": 0.0
+  },
+  "close_on_reversal": {
+    "enabled": false,
+    "bars": 3
   },
   "chainlink": {
     "polygon_rpc_url": "https://polygon.drpc.org",
     "polygon_wss_url": "wss://polygon-bor-rpc.publicnode.com",
     "btc_usd_aggregator": "0xc907E116054Ad103354f2D350FD2514433D57F6f",
-    "alchemy_api_key": ""
+    "alchemy_api_key": "DfkvQ854X-Kg4-ytU2sG0"
   }
 }

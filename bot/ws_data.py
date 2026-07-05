@@ -6,8 +6,17 @@ from typing import Optional, Callable, Dict, List
 from .config import settings
 from .net_utils import get_proxy_url_for
 
+# Binance WS hosts, tried in order on each reconnect. data-stream.binance.vision is
+# the official market-data-only mirror — same streams, no geo-restriction
+# (stream.binance.com returns 451 in some regions).
+BINANCE_WS_HOSTS = [
+    "wss://data-stream.binance.vision",
+    "wss://stream.binance.com:9443",
+]
+
+
 class BinanceTradeStream:
-    """Fast spot-price feed from Binance @trade — the live tick folded into the forming candle."""
+    """Fast spot-price feed from Binance @trade — the leading spot signal for the 1m indicators."""
     def __init__(self, symbol: str, on_update: Optional[Callable] = None):
         self.symbol = symbol.lower()
         self.on_update = on_update
@@ -16,9 +25,10 @@ class BinanceTradeStream:
         self.closed = False
 
     async def start(self):
-        url = f"wss://stream.binance.com:9443/ws/{self.symbol}@trade"
-
+        host_i = 0
         while not self.closed:
+            url = f"{BINANCE_WS_HOSTS[host_i % len(BINANCE_WS_HOSTS)]}/ws/{self.symbol}@trade"
+            host_i += 1
             try:
                 proxy = get_proxy_url_for(url)
                 async with aiohttp.ClientSession() as session:
@@ -58,9 +68,10 @@ class BinanceKlineStream:
         self.closed = False
 
     async def start(self):
-        url = f"wss://stream.binance.com:9443/ws/{self.symbol}@kline_{self.interval}"
-
+        host_i = 0
         while not self.closed:
+            url = f"{BINANCE_WS_HOSTS[host_i % len(BINANCE_WS_HOSTS)]}/ws/{self.symbol}@kline_{self.interval}"
+            host_i += 1
             try:
                 proxy = get_proxy_url_for(url)
                 async with aiohttp.ClientSession() as session:

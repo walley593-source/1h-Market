@@ -64,37 +64,45 @@ async def fetch_live_events_by_series_id(series_id: str, limit: int = 20) -> Lis
         data = res.json()
     return data if isinstance(data, list) else []
 
-async def fetch_available_hourly_series() -> List[Dict]:
-    """The hourly "Up or Down" series (BTC/ETH/SOL/XRP...) for the settings picker."""
-    url = f"{settings.GAMMA_BASE_URL}/series"
+async def fetch_available_15m_series() -> List[Dict]:
+    url = f"{settings.GAMMA_BASE_URL}/events"
     params = {
-        "recurrence": "hourly",
         "active": "true",
         "closed": "false",
-        "limit": 100
+        "limit": 100,
+        "tag_id": "102467" # 15M tag
     }
     proxy = get_proxy_url_for(url)
     async with httpx.AsyncClient(proxy=proxy if proxy else None) as client:
         try:
             res = await client.get(url, params=params)
             res.raise_for_status()
-            series = res.json()
+            events = res.json()
         except:
-            series = []
+            events = []
 
-    series_map = {
-        "10114": {"series_id": "10114", "title": "BTC Up or Down Hourly", "slug": "btc-up-or-down-hourly"}
+    series_map = {}
+    defaults = {
+        "10192": "Bitcoin Up or Down 15m",
+        "10212": "Ethereum Up or Down 15m"
     }
+    for sid, name in defaults.items():
+        series_map[sid] = {"series_id": sid, "title": name}
 
-    for s in series if isinstance(series, list) else []:
-        slug = s.get("slug", "")
-        sid = s.get("id")
-        if sid and "up-or-down-hourly" in slug:
-            series_map[str(sid)] = {
-                "series_id": str(sid),
-                "title": s.get("title") or slug,
-                "slug": slug
-            }
+    for e in events:
+        series_slug = e.get("seriesSlug", "")
+        if "up-or-down-15m" in series_slug:
+            sid = e.get("series_id")
+            if not sid and e.get("series") and isinstance(e["series"], list) and len(e["series"]) > 0:
+                sid = e["series"][0].get("id")
+
+            if sid:
+                asset = series_slug.split("-")[0].upper()
+                series_map[str(sid)] = {
+                    "series_id": str(sid),
+                    "title": f"{asset} Up or Down 15m",
+                    "slug": series_slug
+                }
 
     return sorted(list(series_map.values()), key=lambda x: x["title"])
 

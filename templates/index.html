@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Dashboard - BTC 1h</title>
+    <title>Dashboard - Polymarket Assistant</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <style>
@@ -19,10 +19,7 @@
 <body class="bg-gray-900 text-white min-h-screen p-4 sm:p-8" x-data="assistantData()" x-cloak>
     <div class="max-w-6xl mx-auto">
         <header class="flex flex-col sm:flex-row justify-between items-center mb-6 sm:mb-8 gap-4">
-            <h1 class="text-2xl sm:text-3xl font-bold text-violet-400 flex items-center gap-2">
-                <span x-text="(data.trading_state?.symbol || 'BTC')"></span>
-                <span class="text-[10px] sm:text-xs bg-violet-500 text-white px-2 py-0.5 rounded font-black tracking-wider">1H</span>
-            </h1>
+            <h1 class="text-2xl sm:text-3xl font-bold text-blue-400" x-text="(data.trading_state?.symbol || 'BTC') + ' 15m Assistant'"></h1>
             <div class="flex space-x-2 sm:space-x-4 items-center">
                 <div class="flex items-center space-x-2 text-[10px] sm:text-xs mr-2 sm:mr-4">
                     <div class="flex items-center">
@@ -68,7 +65,7 @@
 
         <!-- Market Summary -->
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8">
-            <div class="bg-gray-800 p-4 sm:p-6 rounded-lg shadow-lg border-l-4 border-violet-500">
+            <div class="bg-gray-800 p-4 sm:p-6 rounded-lg shadow-lg border-l-4 border-blue-500">
                 <p class="text-gray-400 text-xs sm:text-sm uppercase">BTC Binance Spot</p>
                 <h2 class="text-2xl sm:text-3xl font-mono" x-text="'$' + (data.prices?.spot?.toLocaleString() || '-')"></h2>
             </div>
@@ -95,33 +92,49 @@
         </div>
 
         <!-- Prediction -->
-        <div class="bg-gray-800 p-6 sm:p-8 rounded-lg shadow-lg mb-6 sm:mb-8 text-center border-t-2 border-violet-600 overflow-hidden">
-            <p class="text-gray-400 uppercase tracking-widest mb-4 text-xs sm:text-sm">Current Signal</p>
+        <div class="bg-gray-800 p-6 sm:p-8 rounded-lg shadow-lg mb-6 sm:mb-8 text-center border-t-2 border-blue-600 overflow-hidden">
+            <p class="text-gray-400 uppercase tracking-widest mb-4 text-xs sm:text-sm">Current Signal
+                <span class="ml-1 px-2 py-0.5 rounded-full text-[9px]"
+                      :class="data.trading_state?.strategy_mode === 'model' ? 'bg-blue-700 text-blue-100' : 'bg-gray-600 text-gray-200'"
+                      x-text="data.trading_state?.strategy_mode === 'model' ? 'ML MODEL' : 'GATES'"></span>
+            </p>
             <div class="text-3xl sm:text-5xl font-black mb-1 sm:mb-2" :class="data.analysis?.decision?.action === 'ENTER' ? (data.analysis?.decision?.side === 'UP' ? 'text-green-500' : 'text-red-500') : 'text-gray-600'">
-                <span x-text="data.analysis?.decision?.action === 'ENTER' ? (data.analysis?.decision?.side === 'UP' ? 'BUY ↑' : 'SELL ↓') : 'STAND ASIDE'"></span>
+                <span x-text="data.analysis?.decision?.action === 'ENTER' ? (data.analysis?.decision?.side === 'UP' ? 'BUY UP ↑' : 'BUY DOWN ↓') : 'NO TRADE'"></span>
             </div>
             <p class="text-[10px] sm:text-xs uppercase text-gray-400 font-bold" x-text="data.analysis?.decision?.reason || '—'"></p>
+            <p x-show="data.analysis?.decision?.edge != null" class="text-[10px] sm:text-xs uppercase font-bold mt-1"
+               :class="data.analysis?.decision?.edge >= 0 ? 'text-green-400' : 'text-red-400'"
+               x-text="'edge ' + (data.analysis?.decision?.edge >= 0 ? '+' : '') + ((data.analysis?.decision?.edge ?? 0) * 100).toFixed(1) + '¢'"></p>
         </div>
 
         <!-- Indicators -->
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-8 mb-6 sm:mb-8">
             <div class="bg-gray-800 p-4 sm:p-6 rounded-lg shadow-lg">
-                <h3 class="text-lg sm:text-xl font-bold mb-4 border-b border-gray-700 pb-2">Signals</h3>
+                <h3 class="text-lg sm:text-xl font-bold mb-4 border-b border-gray-700 pb-2">Technical Indicators</h3>
                 <div class="space-y-4">
                     <div class="flex justify-between text-sm sm:text-base">
-                        <span class="text-gray-400">Heiken Ashi (15m)</span>
-                        <span :class="data.indicators?.heiken_15m?.color === 'green' ? 'text-green-400' : (data.indicators?.heiken_15m?.color === 'red' ? 'text-red-400' : 'text-gray-500')"
-                              x-text="data.indicators?.heiken_15m?.count != null ? (data.indicators?.heiken_15m?.color + ' x' + data.indicators?.heiken_15m?.count) : '—'"></span>
+                        <span class="text-gray-400">RSI (14) · 50-line</span>
+                        <span :class="data.indicators?.rsi == null ? 'text-white' : (data.indicators.rsi >= 50 ? 'text-green-400' : 'text-red-400')" x-text="data.indicators?.rsi != null ? data.indicators.rsi.toFixed(2) : 'NaN'"></span>
                     </div>
                     <div class="flex justify-between text-sm sm:text-base">
-                        <span class="text-gray-400">Price vs 1h Open <span class="text-[9px] text-gray-600 uppercase" x-text="data.indicators?.vs_open?.source ? ('· ' + data.indicators.vs_open.source) : ''"></span></span>
+                        <span class="text-gray-400">Heiken Ashi (1m)</span>
+                        <span :class="data.indicators?.heiken?.color === 'green' ? 'text-green-400' : (data.indicators?.heiken?.color === 'red' ? 'text-red-400' : 'text-gray-500')"
+                              x-text="data.indicators?.heiken?.count != null ? (data.indicators?.heiken?.color + ' x' + data.indicators?.heiken?.count) : 'NaN'"></span>
+                    </div>
+                    <div class="flex justify-between text-sm sm:text-base">
+                        <span class="text-gray-400">Awesome Osc (1m)</span>
+                        <span :class="data.indicators?.ao?.m1?.color === 'green' ? 'text-green-400' : (data.indicators?.ao?.m1?.color === 'red' ? 'text-red-400' : 'text-gray-500')"
+                              x-text="data.indicators?.ao?.m1?.count != null ? (data.indicators?.ao?.m1?.color + ' x' + data.indicators?.ao?.m1?.count) : 'NaN'"></span>
+                    </div>
+                    <div class="flex justify-between text-sm sm:text-base">
+                        <span class="text-gray-400">Price vs 15m Open <span class="text-[9px] text-gray-600 uppercase" x-text="data.indicators?.vs_open?.source ? ('· ' + data.indicators.vs_open.source) : ''"></span></span>
                         <span :class="data.indicators?.vs_open?.above_open == null ? 'text-gray-500' : (data.indicators.vs_open.above_open ? 'text-green-400' : 'text-red-400')"
                               x-text="data.indicators?.vs_open?.above_open == null ? '—' : (data.indicators.vs_open.above_open ? 'ABOVE (UP)' : 'BELOW (DOWN)')"></span>
                     </div>
-                    <div class="flex justify-between text-sm sm:text-base border-t border-gray-700 pt-3 mt-1">
-                        <span class="text-gray-400">Signal</span>
-                        <span :class="data.analysis?.decision?.action === 'ENTER' ? (data.analysis?.decision?.side === 'UP' ? 'text-green-400 font-bold' : 'text-red-400 font-bold') : 'text-gray-500'"
-                              x-text="data.analysis?.decision?.action === 'ENTER' ? (data.analysis.decision.side === 'UP' ? 'BUY UP' : 'SELL DOWN') : 'STAND ASIDE'"></span>
+                    <div class="flex justify-between text-sm sm:text-base">
+                        <span class="text-gray-400">ML P(up) <span class="text-[9px] text-gray-600 uppercase" x-text="data.trading_state?.strategy_mode === 'model' ? '· live' : '· shadow'"></span></span>
+                        <span :class="data.indicators?.ml?.p_up == null ? 'text-gray-500' : (data.indicators.ml.p_up >= 0.5 ? 'text-green-400' : 'text-red-400')"
+                              x-text="data.indicators?.ml?.p_up != null ? ((data.indicators.ml.p_up * 100).toFixed(1) + '% UP') : 'no model'"></span>
                     </div>
                 </div>
             </div>
@@ -144,9 +157,9 @@
         <!-- Tabs -->
         <div class="bg-gray-800 rounded-lg shadow-lg overflow-hidden mb-8">
             <div class="flex bg-gray-700 overflow-x-auto">
-                <button @click="tab = 'active'" :class="tab === 'active' ? 'bg-gray-800 text-violet-400' : 'text-gray-400 hover:text-white'" class="px-4 sm:px-6 py-3 font-bold uppercase text-[10px] sm:text-sm transition flex-shrink-0">Active Trades</button>
-                <button @click="tab = 'history'" :class="tab === 'history' ? 'bg-gray-800 text-violet-400' : 'text-gray-400 hover:text-white'" class="px-4 sm:px-6 py-3 font-bold uppercase text-[10px] sm:text-sm transition flex-shrink-0">Closed Trades</button>
-                <button @click="tab = 'logs'" :class="tab === 'logs' ? 'bg-gray-800 text-violet-400' : 'text-gray-400 hover:text-white'" class="px-4 sm:px-6 py-3 font-bold uppercase text-[10px] sm:text-sm transition flex-shrink-0">Console Log</button>
+                <button @click="tab = 'active'" :class="tab === 'active' ? 'bg-gray-800 text-blue-400' : 'text-gray-400 hover:text-white'" class="px-4 sm:px-6 py-3 font-bold uppercase text-[10px] sm:text-sm transition flex-shrink-0">Active Trades</button>
+                <button @click="tab = 'history'" :class="tab === 'history' ? 'bg-gray-800 text-blue-400' : 'text-gray-400 hover:text-white'" class="px-4 sm:px-6 py-3 font-bold uppercase text-[10px] sm:text-sm transition flex-shrink-0">Closed Trades</button>
+                <button @click="tab = 'logs'" :class="tab === 'logs' ? 'bg-gray-800 text-blue-400' : 'text-gray-400 hover:text-white'" class="px-4 sm:px-6 py-3 font-bold uppercase text-[10px] sm:text-sm transition flex-shrink-0">Console Log</button>
             </div>
 
             <div class="p-4 sm:p-6">

@@ -18,6 +18,7 @@ import bot.indicators as indicators
 import bot.engines as engines
 import bot.utils as utils
 from bot.clob_trader import clob_trader
+from bot.recorder import recorder
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -43,7 +44,7 @@ async def lifespan(app: FastAPI):
     # Start all background tasks
     tasks = [
         asyncio.create_task(binance_stream.start()),
-        asyncio.create_task(binance_kline_15m.start()),
+        asyncio.create_task(binance_kline_1m.start()),
         asyncio.create_task(polymarket_ws_stream.start()),
         asyncio.create_task(chainlink_ws_stream.start()),
         asyncio.create_task(update_loop())
@@ -56,7 +57,7 @@ async def lifespan(app: FastAPI):
     # (Cancelling without awaiting leaves sessions open -> aiohttp's "Unclosed client
     # session" warning at garbage-collection.)
     binance_stream.close()
-    binance_kline_15m.close()
+    binance_kline_1m.close()
     polymarket_ws_stream.close()
     chainlink_ws_stream.close()
 
@@ -74,7 +75,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-app = FastAPI(title="Polymarket BTC 1h Assistant", lifespan=lifespan)
+app = FastAPI(title="Polymarket BTC 15m Assistant", lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
 
 # Global state to store the latest data
@@ -86,15 +87,16 @@ state = {
     "active_trades": [],
     "trade_history": [],
     "logs": [],
+    "last_trade_side": None,
     "last_balance_refresh": 0,
     "running": False,  # trading is off until the user presses Start on the dashboard
-    "window_marks": {},  # market_id -> {open, open_ts, last, last_ts}: Chainlink 1h open/close
-    "entered_markets": []  # market_ids already traded — ONE fresh entry per 1h window (flips excepted)
+    "window_marks": {},  # market_id -> {open, open_ts, last, last_ts}: Chainlink 15m open/close
+    "entered_markets": []  # market_ids already traded — ONE fresh entry per 15m window (flips excepted)
 }
 
 def _mark_window_entered(market_id):
     """Record that a window (market) has had a position, so it can't be re-entered this
-    1h window (one entry per window). Bounded to the most recent 100."""
+    15m window (one entry per window). Bounded to the most recent 100."""
     mid = str(market_id)
     if mid not in state["entered_markets"]:
         state["entered_markets"].append(mid)
@@ -107,13 +109,23 @@ def save_state():
             "paper_balance": state["paper_balance"],
             "active_trades": state["active_trades"],
             "trade_history": state["trade_history"],
+            "last_trade_side": state["last_trade_side"],
             "window_marks": state["window_marks"],
             "entered_markets": state["entered_markets"]
         }
+        # In LIVE mode state["paper_balance"] mirrors the on-chain balance — persisting
+        # it would silently overwrite the saved PAPER balance. Preserve the last saved
+        # paper balance instead; only paper mode may update it.
+        if state["trading_mode"] != "paper" and os.path.exists("state_data.json"):
+            try:
+                with open("state_data.json", "r") as f:
+                    data_to_save["paper_balance"] = json.load(f).get("paper_balance", settings.PAPER_BALANCE_USD)
+            except Exception:
+                data_to_save["paper_balance"] = settings.PAPER_BALANCE_USD
         with open("state_data.json", "w") as f:
             json.dump(data_to_save, f, indent=2)
-            
-        if os.path.exists("config.json"):
+
+        if state["trading_mode"] == "paper" and os.path.exists("config.json"):
             with open("config.json", "r") as f:
                 cfg = json.load(f)
             cfg["paper_balance_usd"] = state["paper_balance"]
@@ -130,6 +142,7 @@ def load_state():
                 state["paper_balance"] = loaded.get("paper_balance", settings.PAPER_BALANCE_USD)
                 state["active_trades"] = loaded.get("active_trades", [])
                 state["trade_history"] = loaded.get("trade_history", [])
+                state["last_trade_side"] = loaded.get("last_trade_side")
                 state["window_marks"] = loaded.get("window_marks", {})
                 state["entered_markets"] = loaded.get("entered_markets", [])
                 log_message("State loaded from state_data.json")
@@ -169,7 +182,7 @@ def merge_live_close(klines: List[Dict], spot: Optional[float]) -> List[Dict]:
 
 # Background task instances
 binance_stream = ws_data.BinanceTradeStream(symbol=settings.SYMBOL)
-binance_kline_15m = ws_data.BinanceKlineStream(symbol=settings.SYMBOL, interval="15m", limit=200)
+binance_kline_1m = ws_data.BinanceKlineStream(symbol=settings.SYMBOL, interval="1m", limit=240)
 
 polymarket_ws_stream = ws_data.PolymarketChainlinkStream(
     ws_url=settings.POLYMARKET_LIVE_DATA_WS_URL,
@@ -275,44 +288,31 @@ async def fetch_polymarket_snapshot() -> Dict[str, Any]:
     }
 
 async def execute_trade(decision: Dict[str, Any], market_prices: Dict[str, Any], market: Dict[str, Any], target_open: float, token_ids: Dict[str, Any], orderbook: Optional[Dict[str, Any]] = None):
-    # Entry from the decision engine. If a RUNNING position in THIS market is on the
-    # OPPOSITE side of a new ENTER signal, FLIP it (close the held side, then open the
-    # new one) so a fresh opposite signal is never blocked. Returns a short reason string.
+    # Entry from the decision engine. ONE fresh entry per 15m window; a position is
+    # then held to expiry (or closed early only by the reversal-close). Returns a short
+    # reason string.
     if decision["action"] != "ENTER":
         return decision.get("reason", "no_trade")
     side = decision["side"]
     now_ts = time.time()
 
-    # The currently-RUNNING position in THIS market (if any).
-    running_here = next((t for t in state["active_trades"]
-                         if str(t.get("market_id")) == str(market.get("id"))
-                         and now_ts < (t.get("end_ts") or float("inf"))), None)
-    if running_here is not None:
-        if running_here["side"] == side:
-            return "already_in_position"            # already on the signalled side
-        if not settings.FLIP_ON_SIGNAL_ENABLED:
-            return "hold_opposite"                  # flip disabled — hold the position to expiry
-        # Opposite signal -> close the held side, then open the new one (flip). This is
-        # the ONE exception to "one entry per window" (it requires a held opposite side).
-        if not await _close_position(running_here, market_prices, token_ids, orderbook, "signal_flip"):
-            return "flip_close_failed"
-        log_message(f"FLIP on new signal: {running_here['side']} -> {side}")
-    else:
-        # FRESH entry — ONE per 1h window. If this window already had a position,
-        # block re-entry until the next market.
-        if str(market.get("id")) in state["entered_markets"]:
-            return "window_done"
+    # Already positioned in THIS market? Hold it — never double up or flip.
+    if any(str(t.get("market_id")) == str(market.get("id")) for t in state["active_trades"]):
+        return "already_in_position"
 
-    # CONSTRAINT: one *running* position at a time. A trade whose 1h window has already
+    # FRESH entry — ONE per 15m window. If this window already had a position (incl. one
+    # closed early on a 1m reversal), block re-entry until the next market.
+    if str(market.get("id")) in state["entered_markets"]:
+        return "window_done"
+
+    # CONSTRAINT: one *running* position at a time. A trade whose 15m window has already
     # ended (only awaiting Polymarket's resolution) no longer blocks a new entry — the next
     # market is already live, so we can trade it while the old one settles in the background.
     if any(now_ts < (t.get("end_ts") or float("inf")) for t in state["active_trades"]):
         return "slot_busy"
-    # Never hold two positions in the same market (running or still settling).
-    if any(str(t.get("market_id")) == str(market.get("id")) for t in state["active_trades"]):
-        return "market_busy"
 
-    return await _open_position(side, market_prices, market, target_open, token_ids, orderbook)
+    return await _open_position(side, market_prices, market, target_open, token_ids, orderbook,
+                                model_p=decision.get("model_p"))
 
 
 async def _close_position(trade: Dict[str, Any], market_prices: Optional[Dict[str, Any]], token_ids: Optional[Dict[str, Any]], orderbook: Optional[Dict[str, Any]], reason: str) -> bool:
@@ -343,29 +343,40 @@ async def _close_position(trade: Dict[str, Any], market_prices: Optional[Dict[st
     trade["profit_loss"] = (trade["shares"] * exit_price) - trade["amount"]
     state["trade_history"].append(trade)
     state["active_trades"] = [t for t in state["active_trades"] if t is not trade]
+    state["last_trade_side"] = None
     save_state()
     log_message(f"CLOSE ({reason}): {trade['side']} @ {exit_price:.2f} (P/L ${trade['profit_loss']:.2f})")
     return True
 
 
-async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[str, Any], target_open: float, token_ids: Dict[str, Any], orderbook: Optional[Dict[str, Any]] = None):
+async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[str, Any], target_open: float, token_ids: Dict[str, Any], orderbook: Optional[Dict[str, Any]] = None, model_p: Optional[float] = None):
     # Open a fresh position on `side`: sizing, liquidity trim, and paper/live execution.
-    # Entry GATES (the decide_entry signal, slot/market-busy) are the caller's responsibility
-    # — a flip reuses this to open the opposite side unconditionally.
+    # Entry GATES (the decide signal, slot/window-busy) are the caller's responsibility.
     price = market_prices["up"] if side == "UP" else market_prices["down"]
     if price is None:
         return "no_price"
 
     # ── Risk per trade ──────────────────────────────────────────────────────────
-    # RISK_TYPE selects how the stake (the dollars put at risk) is sized:
-    #   "percent" -> RISK_VALUE% of the current balance
-    #   "fixed"   -> RISK_VALUE dollars, flat
+    # RISK_TYPE sets the base stake: "percent" -> RISK_VALUE% of balance, "fixed" ->
+    # RISK_VALUE dollars. This is the CAP.
     balance = state["paper_balance"]
     risk_type = (settings.RISK_TYPE or "percent").lower()
     if risk_type == "fixed":
         amount_to_risk = float(settings.RISK_VALUE)
     else:  # "percent" (default)
         amount_to_risk = (float(settings.RISK_VALUE) / 100.0) * balance
+
+    # ── Fractional-Kelly sizing (model mode only) ───────────────────────────────
+    # A $1 binary bought at `price` with win prob p has full-Kelly fraction
+    # f = (p - price) / (1 - price). Stake MODEL_KELLY_FRACTION * f * balance, but never
+    # more than the RISK_VALUE cap above — Kelly only ever sizes DOWN for thin edges.
+    if (settings.STRATEGY_MODE or "").lower() == "model" and model_p is not None \
+            and settings.MODEL_KELLY_FRACTION > 0 and 0 < price < 1:
+        full_kelly = (model_p - price) / (1.0 - price)
+        if full_kelly <= 0:
+            return "kelly_no_edge"
+        kelly_stake = settings.MODEL_KELLY_FRACTION * full_kelly * balance
+        amount_to_risk = min(amount_to_risk, kelly_stake)
 
     if amount_to_risk <= 0:
         return "stake_zero"
@@ -414,6 +425,7 @@ async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[
     if state["trading_mode"] == "paper":
         state["paper_balance"] -= amount_to_risk
         state["active_trades"].append(trade)
+        state["last_trade_side"] = side
         _mark_window_entered(market["id"])
         save_state()
 
@@ -435,6 +447,7 @@ async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[
             trade["order_id"] = order_id
             trade["order_response"] = resp
             state["active_trades"].append(trade)
+            state["last_trade_side"] = side
             _mark_window_entered(market["id"])
             save_state()
             log_message(f"Executed LIVE trade: {side} ${amount_to_risk:.2f} on {market.get('slug')} (order {order_id})")
@@ -442,6 +455,99 @@ async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[
         else:
             log_message(f"LIVE trade FAILED ({side}): {result.get('error')}")
             return "live_order_failed"
+
+async def maybe_ml_exit(ml_p_up: Optional[float], poly_snapshot: Dict[str, Any]):
+    """ML-driven exit for the running position (model mode only), the mirror of the
+    entry model. Uses the SAME calibrated P(up): sell the held side when the market's
+    bid overpays vs the model's fair value (take-profit) or the win prob collapses (stop).
+
+    EXIT_MODE gates action: "off" = skip; "shadow" = log the would-sell but DON'T act
+    (so it can be validated against hold-to-expiry); "live" = actually close. Every
+    evaluation of an open position is logged to logs/ml/exits.csv either way.
+    """
+    exit_mode = (settings.EXIT_MODE or "off").lower()
+    if exit_mode == "off":
+        return
+    if (settings.STRATEGY_MODE or "").lower() != "model":
+        return
+    if ml_p_up is None or not state["active_trades"]:
+        return
+
+    market = poly_snapshot["market"]
+    now_ts = time.time()
+    trade = next((t for t in state["active_trades"]
+                  if str(t.get("market_id")) == str(market.get("id"))
+                  and now_ts < (t.get("end_ts") or float("inf"))), None)
+    if trade is None:
+        return
+
+    held_key = "up" if trade["side"] == "UP" else "down"
+    ob = (poly_snapshot.get("orderbook") or {}).get(held_key) or {}
+    held_bid = ob.get("bestBid")
+
+    exit_decision = engines.decide_exit({
+        "side": trade["side"],
+        "pUp": ml_p_up,
+        "heldBid": held_bid,
+        "tpMargin": settings.EXIT_TAKE_PROFIT_MARGIN,
+        "stopProb": settings.EXIT_STOP_PROB,
+    })
+
+    will_act = exit_decision["action"] == "SELL" and exit_mode == "live"
+    recorder.log_exit(trade, exit_decision, poly_snapshot.get("timing"), exit_mode, will_act)
+
+    if exit_decision["action"] != "SELL":
+        return
+    if exit_mode == "shadow":
+        log_message(f"[SHADOW EXIT] would sell {trade['side']} ({exit_decision['reason']}) "
+                    f"— holding (shadow mode)")
+        return
+    # live: actually close into the book
+    await _close_position(trade, poly_snapshot.get("prices"), poly_snapshot.get("token_ids", {}),
+                          poly_snapshot.get("orderbook", {}), f"ml_exit:{exit_decision['reason']}")
+
+
+async def maybe_close_on_reversal(ha1_color: Optional[str], ha1_count: Optional[int], ao1_color: Optional[str], ao1_count: Optional[int], poly_snapshot: Dict[str, Any]):
+    """CLOSE a running position (do NOT reverse) when the 1m HA and the 1m AO BOTH flip
+    against it AND each has held the reversal colour for >= CLOSE_REVERSAL_BARS bars
+    (default 3). E.g. holding UP, when both the 1m HA and 1m AO have been red for >=3 bars
+    -> sell the UP and go flat. Colours/counts passed in are computed on CLOSED 1m candles
+    only, so the requirement really means N completed bars — the live forming candle
+    can't fake the confirmation. This only CLOSES the position — it never opens the
+    opposite side.
+
+    CLOSE_ON_REVERSAL_ENABLED is the master switch.
+    """
+    if not settings.CLOSE_ON_REVERSAL_ENABLED:
+        return
+    if not state["active_trades"]:
+        return
+    if ha1_color not in ("green", "red") or ao1_color not in ("green", "red"):
+        return
+
+    market = poly_snapshot["market"]
+
+    # Only the currently-RUNNING position in THIS market. Trades from past markets that
+    # are merely awaiting resolution are left alone to settle.
+    now_ts = time.time()
+    trade = next((t for t in state["active_trades"]
+                  if str(t.get("market_id")) == str(market.get("id"))
+                  and now_ts < (t.get("end_ts") or float("inf"))), None)
+    if trade is None:
+        return
+
+    # Reversal colour = opposite of the held side. Both 1m HA AND 1m AO must show it,
+    # each for at least CLOSE_REVERSAL_BARS consecutive bars (confirmed, not a flicker).
+    reversal = "red" if trade["side"] == "UP" else "green"
+    bars = settings.CLOSE_REVERSAL_BARS
+    if ha1_color != reversal or ao1_color != reversal:
+        return  # not a 1m reversal (HA + AO) against the held side
+    if (ha1_count or 0) < bars or (ao1_count or 0) < bars:
+        return  # reversal not yet confirmed for >= bars on both 1m HA and 1m AO
+
+    # Close only — never open the opposite side.
+    await _close_position(trade, poly_snapshot.get("prices"), poly_snapshot.get("token_ids", {}),
+                          poly_snapshot.get("orderbook", {}), "reversal_close")
 
 async def update_trades(current_prices: Dict[str, Any]):
     remaining_active = []
@@ -596,9 +702,9 @@ async def update_trades(current_prices: Dict[str, Any]):
 
 async def seed_kline_buffers():
     try:
-        k15m = await data.fetch_klines(settings.SYMBOL, "15m", 200)
-        binance_kline_15m.set_candles(k15m)
-        log_message(f"Seeded Binance 15m kline buffer for {settings.SYMBOL}")
+        k1m = await data.fetch_klines(settings.SYMBOL, "1m", 240)
+        binance_kline_1m.set_candles(k1m)
+        log_message(f"Seeded Binance 1m kline buffer for {settings.SYMBOL}")
     except Exception as e:
         log_message(f"Failed to seed kline buffers: {e}")
 
@@ -633,17 +739,23 @@ async def update_loop():
 
             spot_price = binance_ws.get("price") if binance_ws and binance_ws.get("price") else last_price
 
-            # Fold the live @trade websocket tick into the forming 15m candle so the
-            # Heiken-Ashi is computed in real time off live data, not just on the
-            # slower kline-WS candle pushes.
-            klines_15m = merge_live_close(binance_kline_15m.get_candles(), spot_price)
+            # Fold the live @trade websocket tick into the forming 1m candle so the
+            # indicators (HA, RSI, AO) are computed in real time off live data, not just
+            # on the slower kline-WS candle pushes.
+            raw_klines_1m = binance_kline_1m.get_candles()
+            klines_1m = merge_live_close(raw_klines_1m, spot_price)
+            # CLOSED candles only (the forming candle dropped) — used for the streak
+            # counts that gate the reversal-close, so a flickering live candle can't
+            # fake a "confirmed for N bars" reversal.
+            now_ms = time.time() * 1000
+            closed_klines_1m = [c for c in raw_klines_1m if c.get("closeTime") and c["closeTime"] <= now_ms]
 
             # Window open price (the strike) — recorded on each trade for reference.
-            # The 1h window start is also a 15m boundary, so take the 15m candle at it.
+            # The 15m window start is also a 1m boundary, so take the 1m candle at it.
             target_open = spot_price
-            if klines_15m:
+            if klines_1m:
                 start_ms = timing["startMs"]
-                for c in reversed(klines_15m):
+                for c in reversed(klines_1m):
                     if c["openTime"] <= start_ms:
                         target_open = c["open"]
                         break
@@ -661,7 +773,7 @@ async def update_loop():
                 current_price = chainlink_data["price"]
                 price_source = "Chainlink RPC REST"
 
-            # ── Mark the 1h window's Chainlink OPEN/CLOSE ────────────────────────
+            # ── Mark the 15m window's Chainlink OPEN/CLOSE ───────────────────────
             # Polymarket settles BTC Up/Down on Chainlink. A market becomes the live
             # window exactly at its start, so the FIRST time we see it we snapshot the
             # open; every later tick refreshes "last" (which freezes at ~window end,
@@ -688,37 +800,101 @@ async def update_loop():
 
             time_left_min = (settlement_ms - time.time() * 1000) / 60_000 if settlement_ms else timing["remainingMinutes"]
 
-            # 15m Heiken-Ashi streak {color, count} — the direction signal.
-            consec = indicators.count_consecutive(indicators.compute_heiken_ashi(klines_15m))
+            closes = [c["close"] for c in klines_1m]
+            rsi_now = indicators.compute_rsi(closes, settings.RSI_PERIOD)
+
+            # 1m Heiken-Ashi streak {color, count} — the direction (used by decide_entry).
+            consec = indicators.count_consecutive(indicators.compute_heiken_ashi(klines_1m))
+
+            # 1m Awesome Oscillator — {value, color, count}. color = AO bar colour
+            # (green = rising bar, red = falling/flat). Decision uses the colour; count is
+            # a display streak (shown like the HA).
+            ao_1m = indicators.compute_awesome_oscillator(klines_1m)
+
+            # CLOSED-candle streaks — feed the reversal-close's "held for >= N bars"
+            # requirement so the forming candle's flicker can't fake a confirmed reversal.
+            consec_closed = indicators.count_consecutive(indicators.compute_heiken_ashi(closed_klines_1m))
+            ao_1m_closed = indicators.compute_awesome_oscillator(closed_klines_1m)
 
             market_up = poly_snapshot["prices"]["up"] if poly_snapshot["ok"] else None
             market_down = poly_snapshot["prices"]["down"] if poly_snapshot["ok"] else None
 
-            # ── PERSISTENCE: current price vs the 1h window OPEN. above => UP, below => DOWN.
-            # Prefer the CHAINLINK open (what Polymarket settles on) when it was snapshotted
-            # at the window start (open_ts near it); else fall back to the BINANCE 15m hour
-            # open (`target_open`, always available from the seeded klines). Same feed each
-            # branch = no cross-feed offset.
+            # ── PERSISTENCE: current price vs the 15m window OPEN. above => UP bias, below
+            # => DOWN bias. Prefer the CHAINLINK open (what Polymarket settles on) — but
+            # ONLY when it was actually snapshotted at the window start (open_ts near the
+            # start). On a fresh / mid-window start that Chainlink open is missing or wrong,
+            # so fall back to the BINANCE 1m window open (`target_open`, always available
+            # from the seeded klines). Each branch compares SAME feed = no cross-feed offset.
             window_open = None
             above_open = None
             open_source = None
+            lead_bps = None  # |price - window open| in bps of price — the lead's size
             if poly_snapshot.get("ok"):
                 _wm = state["window_marks"].get(str(poly_snapshot["market"].get("id"))) or {}
                 _start_sec = timing["startMs"] / 1000.0
                 _cl_open, _cl_open_ts = _wm.get("open"), _wm.get("open_ts")
-                if _cl_open and _cl_open_ts and _cl_open_ts <= _start_sec + 120 and current_price:
+                if _cl_open and _cl_open_ts and _cl_open_ts <= _start_sec + 60 and current_price:
                     window_open, above_open, open_source = _cl_open, (current_price > _cl_open), "chainlink"
+                    lead_bps = abs(current_price - _cl_open) / current_price * 10_000
                 elif target_open and spot_price:
                     window_open, above_open, open_source = target_open, (spot_price > target_open), "binance"
+                    lead_bps = abs(spot_price - target_open) / spot_price * 10_000
 
-            # ── ENTRY (simple): BUY if price ABOVE the 1h open AND 15m HA green; SELL if
-            # ── price BELOW AND 15m HA red. A new opposite signal flips the position.
-            decision = engines.decide_entry({
-                "aboveOpen": above_open,        # price vs the 1h open (persistence)
-                "ha15Color": consec["color"],   # 15m Heiken-Ashi colour
-                "priceUp": market_up,
-                "priceDown": market_down,
-            })
+            # ── ML SCORE (before the decision): build the feature vector, advance the
+            # per-window path state, and run the model to get P(up). Also feeds the
+            # recorder's dataset. Never fatal — on any error p_up stays None.
+            ml_snap = None
+            scored = {"p_up": None, "feats": None, "lead_bps": lead_bps}
+            if poly_snapshot.get("ok"):
+                ml_snap = {
+                    "market_id": poly_snapshot["market"].get("id"),
+                    "slug": poly_snapshot["market"].get("slug"),
+                    "timing": timing,
+                    "spot": spot_price,
+                    "chainlink": current_price,
+                    "window_open": window_open,
+                    "open_source": open_source,
+                    "closed_closes": [c["close"] for c in closed_klines_1m],
+                    "ha_color": consec_closed["color"], "ha_count": consec_closed["count"],
+                    "ao_color": ao_1m_closed["color"], "ao_count": ao_1m_closed["count"],
+                    "rsi": rsi_now,
+                    "orderbook": poly_snapshot.get("orderbook"),
+                    "running": state["running"],
+                    "window_marks": state["window_marks"],
+                }
+                try:
+                    scored = recorder.score(ml_snap)
+                except Exception:
+                    pass
+            ml_p_up = scored.get("p_up")
+
+            # ── ENTRY DECISION — dispatched by STRATEGY_MODE ─────────────────────
+            #   "model": the calibrated P(up) drives it; EV gate = P(win) - ask >= margin.
+            #            The indicator/timing/lead gates are subsumed into the features.
+            #   "gates": the purely-technical hand-gate stack (fallback / A-B).
+            decision = engines.decide(
+                settings.STRATEGY_MODE,
+                gate_inputs={
+                    "ha1Color": consec["color"],
+                    "ao1": ao_1m["color"],
+                    "aboveOpen": above_open,
+                    "leadBps": lead_bps,
+                    "minLeadBps": settings.MIN_LEAD_BPS,
+                    "elapsedMin": timing["elapsedMinutes"],
+                    "minEntryMinute": settings.MIN_ENTRY_ELAPSED_MIN,
+                    "priceUp": market_up,
+                    "priceDown": market_down,
+                    "maxPrice": settings.MAX_ENTRY_PRICE,
+                    "rsi": rsi_now,
+                },
+                model_inputs={
+                    "pUp": ml_p_up,
+                    "priceUp": market_up,
+                    "priceDown": market_down,
+                    "minConf": settings.MODEL_MIN_CONF,
+                    "evMargin": settings.MODEL_EV_MARGIN,
+                },
+            )
 
             current_prices_dict = {"spot": spot_price, "chainlink": current_price}
 
@@ -726,9 +902,13 @@ async def update_loop():
             # and the dashboard keep updating regardless so the balance view stays live.
             exec_result = None
             if poly_snapshot["ok"] and state["running"]:
-                # A new opposite signal FLIPS the position (close + open opposite); a
-                # same-side signal is already_in_position; otherwise hold to expiry.
                 exec_result = await execute_trade(decision, poly_snapshot["prices"], poly_snapshot["market"], target_open, poly_snapshot.get("token_ids", {}), poly_snapshot.get("orderbook", {}))
+                # ML EXIT (model mode): the same P(up) decides whether to sell the held
+                # side early. Shadow by default — logs would-sell decisions without acting.
+                await maybe_ml_exit(ml_p_up, poly_snapshot)
+                # Reversal-close judges CLOSED candles only — the forming candle can't
+                # fake (or veto) a confirmed N-bar reversal by flickering intra-minute.
+                await maybe_close_on_reversal(consec_closed["color"], consec_closed["count"], ao_1m_closed["color"], ao_1m_closed["count"], poly_snapshot)
             elif not state["running"]:
                 exec_result = "stopped"
 
@@ -743,6 +923,15 @@ async def update_loop():
                     if real_bal is not None:
                         state["paper_balance"] = real_bal
                     state["last_balance_refresh"] = now_ts
+
+            # ── ML recorder: write the tick row (features + live odds + P(up) + the
+            # decision just made). This accumulating dataset is the only way to ever
+            # validate P(up) against the market's ask. Never fatal.
+            if ml_snap is not None:
+                try:
+                    recorder.log(ml_snap, scored, decision)
+                except Exception:
+                    pass
 
             signal_label = f"BUY {decision['side']}" if decision["action"] == "ENTER" else "NO TRADE"
             utils.append_csv_row("./logs/signals.csv", csv_header, [
@@ -763,7 +952,8 @@ async def update_loop():
                     "active_trades": state["active_trades"],
                     "history_count": len(state["trade_history"]),
                     "risk": {"type": settings.RISK_TYPE, "value": settings.RISK_VALUE},
-                    "symbol": settings.SYMBOL
+                    "symbol": settings.SYMBOL,
+                    "strategy_mode": settings.STRATEGY_MODE
                 },
                 "prices": {
                     "spot": spot_price,
@@ -773,8 +963,11 @@ async def update_loop():
                     "poly_down": market_down
                 },
                 "indicators": {
-                    "heiken_15m": consec,
-                    "vs_open": {"window_open": window_open, "above_open": above_open, "source": open_source}
+                    "rsi": rsi_now,
+                    "heiken": consec,
+                    "ao": {"m1": ao_1m},
+                    "vs_open": {"window_open": window_open, "above_open": above_open, "source": open_source, "lead_bps": lead_bps},
+                    "ml": {"p_up": ml_p_up, "edge": decision.get("edge")}  # P(up) + entry edge (model mode)
                 },
                 "analysis": {
                     "decision": decision
@@ -806,7 +999,7 @@ async def get_logs():
 
 @app.get("/api/available-series")
 async def get_available_series():
-    return await data.fetch_available_hourly_series()
+    return await data.fetch_available_15m_series()
 
 @app.get("/api/settings")
 async def get_settings():
@@ -837,14 +1030,29 @@ async def get_settings():
             "risk_value": settings.RISK_VALUE
         },
         "entry": {
-            "flip_on_signal": settings.FLIP_ON_SIGNAL_ENABLED,
-            "min_book_liquidity_usd": settings.MIN_BOOK_LIQUIDITY_USD
+            "max_price": settings.MAX_ENTRY_PRICE,
+            "min_book_liquidity_usd": settings.MIN_BOOK_LIQUIDITY_USD,
+            "min_entry_minute": settings.MIN_ENTRY_ELAPSED_MIN,
+            "min_lead_bps": settings.MIN_LEAD_BPS
+        },
+        "strategy": {
+            "mode": settings.STRATEGY_MODE,
+            "model_min_conf": settings.MODEL_MIN_CONF,
+            "model_ev_margin": settings.MODEL_EV_MARGIN,
+            "model_kelly_fraction": settings.MODEL_KELLY_FRACTION,
+            "exit_mode": settings.EXIT_MODE,
+            "exit_take_profit_margin": settings.EXIT_TAKE_PROFIT_MARGIN,
+            "exit_stop_prob": settings.EXIT_STOP_PROB
+        },
+        "close_on_reversal": {
+            "enabled": settings.CLOSE_ON_REVERSAL_ENABLED,
+            "bars": settings.CLOSE_REVERSAL_BARS
         }
     }
 
 @app.post("/api/settings")
 async def post_settings(new_settings: Dict[str, Any]):
-    global binance_stream, polymarket_ws_stream, chainlink_ws_stream, binance_kline_15m
+    global binance_stream, polymarket_ws_stream, chainlink_ws_stream, binance_kline_1m
     old_symbol = settings.SYMBOL
 
     # Credential may be a hex private key OR a 12/24-word seed phrase. We persist
@@ -894,9 +1102,34 @@ async def post_settings(new_settings: Dict[str, Any]):
 
     if "entry" in new_settings:
         en = new_settings["entry"]
-        if "flip_on_signal" in en:
-            settings.FLIP_ON_SIGNAL_ENABLED = bool(en["flip_on_signal"])
+        settings.MAX_ENTRY_PRICE = float(en.get("max_price", settings.MAX_ENTRY_PRICE))
         settings.MIN_BOOK_LIQUIDITY_USD = float(en.get("min_book_liquidity_usd", settings.MIN_BOOK_LIQUIDITY_USD))
+        settings.MIN_ENTRY_ELAPSED_MIN = float(en.get("min_entry_minute", settings.MIN_ENTRY_ELAPSED_MIN))
+        settings.MIN_LEAD_BPS = float(en.get("min_lead_bps", settings.MIN_LEAD_BPS))
+
+    if "strategy" in new_settings:
+        st = new_settings["strategy"]
+        if "mode" in st:
+            settings.STRATEGY_MODE = st["mode"]
+        if "model_min_conf" in st:
+            settings.MODEL_MIN_CONF = float(st["model_min_conf"])
+        if "model_ev_margin" in st:
+            settings.MODEL_EV_MARGIN = float(st["model_ev_margin"])
+        if "model_kelly_fraction" in st:
+            settings.MODEL_KELLY_FRACTION = float(st["model_kelly_fraction"])
+        if "exit_mode" in st:
+            settings.EXIT_MODE = st["exit_mode"]
+        if "exit_take_profit_margin" in st:
+            settings.EXIT_TAKE_PROFIT_MARGIN = float(st["exit_take_profit_margin"])
+        if "exit_stop_prob" in st:
+            settings.EXIT_STOP_PROB = float(st["exit_stop_prob"])
+
+    if "close_on_reversal" in new_settings:
+        c = new_settings["close_on_reversal"]
+        if "enabled" in c:
+            settings.CLOSE_ON_REVERSAL_ENABLED = bool(c["enabled"])
+        if "bars" in c:
+            settings.CLOSE_REVERSAL_BARS = int(c["bars"])
 
     if "polymarket" in new_settings:
         p = new_settings["polymarket"]
@@ -928,9 +1161,9 @@ async def post_settings(new_settings: Dict[str, Any]):
         binance_stream = ws_data.BinanceTradeStream(symbol=settings.SYMBOL)
         asyncio.create_task(binance_stream.start())
 
-        binance_kline_15m.close()
-        binance_kline_15m = ws_data.BinanceKlineStream(symbol=settings.SYMBOL, interval="15m", limit=200)
-        asyncio.create_task(binance_kline_15m.start())
+        binance_kline_1m.close()
+        binance_kline_1m = ws_data.BinanceKlineStream(symbol=settings.SYMBOL, interval="1m", limit=240)
+        asyncio.create_task(binance_kline_1m.start())
 
         await seed_kline_buffers()
 
@@ -994,4 +1227,4 @@ async def get_history():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8100)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
