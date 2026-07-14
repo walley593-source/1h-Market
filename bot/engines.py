@@ -75,6 +75,64 @@ def decide_model(inputs: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def decide_tp_sl(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """TAKE-PROFIT / STOP-LOSS on an open position, as a % of the AMOUNT STAKED.
+
+    The position is marked to market at the held side's best BID — what selling back
+    right now would actually yield. (Never the ask: that is what you'd PAY to buy, and
+    marking against it would overstate P&L by the spread and fire TP too early.)
+
+        value   = shares * bid
+        pnl     = value - amount            (amount = USD staked at entry)
+        pnl_pct = pnl / amount * 100
+
+    TP fires when pnl_pct >= +tpPercent; SL fires when pnl_pct <= -slPercent. The two are
+    INDEPENDENT toggles — either, both, or neither may be armed. Strategy-agnostic: this
+    is a pure risk rule on realized book value, so it works in both "model" and "gates"
+    mode and knows nothing about the model.
+
+    Inputs:
+      amount      USD staked at entry (> 0)
+      shares      shares held (> 0)
+      heldBid     best bid on the held side (None/0 -> HOLD; nothing would buy it back)
+      tpEnabled   bool + tpPercent (% of stake, e.g. 30.0)
+      slEnabled   bool + slPercent (% of stake, e.g. 30.0)
+
+    Returns {"action": "SELL"/"HOLD", "reason", "pnl_pct", "pnl", "bid"}.
+    """
+    tp_enabled = bool(inputs.get("tpEnabled"))
+    sl_enabled = bool(inputs.get("slEnabled"))
+    if not tp_enabled and not sl_enabled:
+        return {"action": "HOLD", "reason": "tp_sl_off", "pnl_pct": None, "pnl": None, "bid": None}
+
+    amount = inputs.get("amount")
+    shares = inputs.get("shares")
+    bid = inputs.get("heldBid")
+
+    if not amount or amount <= 0 or not shares or shares <= 0:
+        return {"action": "HOLD", "reason": "tp_sl_no_position", "pnl_pct": None, "pnl": None, "bid": bid}
+    if bid is None or bid <= 0:
+        # No bid on the held side — we can neither mark it nor sell into it. Hold.
+        return {"action": "HOLD", "reason": "tp_sl_no_bid", "pnl_pct": None, "pnl": None, "bid": bid}
+
+    pnl = (shares * bid) - amount
+    pnl_pct = pnl / amount * 100.0
+
+    tp_pct = float(inputs.get("tpPercent") or 0)
+    sl_pct = float(inputs.get("slPercent") or 0)
+
+    # A percent of 0 means "disabled" even when the toggle is on — never sell at break-even.
+    if tp_enabled and tp_pct > 0 and pnl_pct >= tp_pct:
+        return {"action": "SELL", "reason": f"take_profit_{pnl_pct:+.1f}pct_target_{tp_pct:.0f}",
+                "pnl_pct": pnl_pct, "pnl": pnl, "bid": bid}
+    if sl_enabled and sl_pct > 0 and pnl_pct <= -sl_pct:
+        return {"action": "SELL", "reason": f"stop_loss_{pnl_pct:+.1f}pct_limit_-{sl_pct:.0f}",
+                "pnl_pct": pnl_pct, "pnl": pnl, "bid": bid}
+
+    return {"action": "HOLD", "reason": f"tp_sl_hold_{pnl_pct:+.1f}pct",
+            "pnl_pct": pnl_pct, "pnl": pnl, "bid": bid}
+
+
 def decide_exit(inputs: Dict[str, Any]) -> Dict[str, Any]:
     """ML-driven EXIT for an open position — the mirror of decide_model, driven by the
     SAME calibrated probability. The entry model's P(up) already gives P(the held side

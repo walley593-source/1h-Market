@@ -163,6 +163,48 @@
                     </div>
                     <p class="text-[10px] text-gray-500 mt-2 italic">When on, an open position is <strong>closed</strong> (not reversed) once the <strong>1m HA and the 1m AO have both flipped against it for ≥ Reversal Bars consecutive bars</strong> (e.g. 3) — holding UP, both red ×3 → sell the UP and go flat. The bar count avoids closing on a single-bar flicker. It only closes (never reverses), and the window is then locked for the rest of the 15m (one entry per window). Sells into the book in live mode.</p>
                 </div>
+
+                <div class="p-4 bg-gray-900/50 rounded-lg border border-amber-800/60">
+                    <span class="text-sm font-bold text-amber-400 uppercase">Take-Profit / Stop-Loss (% of stake)</span>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
+                        <div>
+                            <label class="flex items-center gap-2 mb-2">
+                                <input type="checkbox" x-model="form.take_profit.enabled" class="w-4 h-4">
+                                <span class="text-xs font-bold text-green-400 uppercase">Take-Profit</span>
+                            </label>
+                            <label class="block text-[10px] text-gray-500 mb-1 uppercase">Close at profit ≥ (% of stake)</label>
+                            <input type="number" step="1" min="1" max="500" :disabled="!form.take_profit.enabled"
+                                   x-model.number="form.take_profit.percent"
+                                   class="w-full bg-gray-700 border-none rounded p-2 text-sm text-white disabled:opacity-40">
+                        </div>
+                        <div>
+                            <label class="flex items-center gap-2 mb-2">
+                                <input type="checkbox" x-model="form.stop_loss.enabled" class="w-4 h-4">
+                                <span class="text-xs font-bold text-red-400 uppercase">Stop-Loss</span>
+                            </label>
+                            <label class="block text-[10px] text-gray-500 mb-1 uppercase">Close at loss ≥ (% of stake)</label>
+                            <input type="number" step="1" min="1" max="100" :disabled="!form.stop_loss.enabled"
+                                   x-model.number="form.stop_loss.percent"
+                                   class="w-full bg-gray-700 border-none rounded p-2 text-sm text-white disabled:opacity-40">
+                        </div>
+                    </div>
+
+                    <p class="text-[10px] text-gray-500 mt-3 italic">
+                        Two <strong>independent</strong> toggles. The open position is marked to market at the held side's
+                        <strong>best bid</strong> (what selling right now actually yields), and P&amp;L is measured as a
+                        <strong>% of the amount staked</strong>: <code>(shares × bid − stake) / stake</code>.
+                        With a $10 stake and 30%: <strong>Take-Profit</strong> sells once the position is worth ≥ $13,
+                        <strong>Stop-Loss</strong> sells once it drops to ≤ $7. These are hard risk rules — they are
+                        checked <strong>before</strong> the ML exit and the 1m reversal-close, and they apply in
+                        <strong>both</strong> strategy modes. The window stays locked afterwards (one entry per window),
+                        so the bot will not re-enter. Live P&amp;L is shown on the open trade on the dashboard.
+                        <br><br>
+                        <strong class="text-amber-400">Both ship OFF.</strong> This bot's own trade log showed early exits
+                        <strong>losing</strong> to holding to expiry (held-to-expiry +$699 vs signal-flip −$209 and
+                        reversal-close −$62), so arm these deliberately and watch the results.
+                    </p>
+                </div>
             </div>
 
             <!-- Secrets -->
@@ -224,7 +266,9 @@
                     strategy: { mode: 'model', model_min_conf: 0.80, model_ev_margin: 0.02, model_kelly_fraction: 0.25, exit_mode: 'shadow', exit_take_profit_margin: 0.03, exit_stop_prob: 0.0 },
                     chainlink: { alchemy_api_key: '' },
                     relayer: { api_key: '' },
-                    close_on_reversal: { enabled: false, bars: 3 }
+                    close_on_reversal: { enabled: false, bars: 3 },
+                    take_profit: { enabled: false, percent: 30 },
+                    stop_loss: { enabled: false, percent: 30 }
                 },
                 message: '',
                 messageType: '',

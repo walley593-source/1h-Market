@@ -86,6 +86,22 @@ class Settings(BaseSettings):
     CLOSE_ON_REVERSAL_ENABLED: bool = False
     CLOSE_REVERSAL_BARS: int = 3   # require the 1m HA & 1m AO reversal to hold >= this many bars
 
+    # ── TAKE-PROFIT / STOP-LOSS — % of the AMOUNT STAKED on the trade ───────────
+    # The open position is marked to market at the held side's best BID (what selling
+    # back right now actually yields):
+    #     pnl_pct = (shares * bid - amount) / amount * 100
+    # TP closes the trade when pnl_pct >= +TAKE_PROFIT_PERCENT; SL closes it when
+    # pnl_pct <= -STOP_LOSS_PERCENT. The two are INDEPENDENT toggles (either, both or
+    # neither). Strategy-agnostic — they work in both "model" and "gates" mode.
+    #
+    # Default OFF: prior backtests on this bot showed early exits LOSE to holding to
+    # expiry (held +$699 vs signal_flip -$209 / reversal_close -$62), so arming these
+    # is a deliberate choice, not a default.
+    TAKE_PROFIT_ENABLED: bool = False
+    TAKE_PROFIT_PERCENT: float = 30.0   # close at +30% of the stake
+    STOP_LOSS_ENABLED: bool = False
+    STOP_LOSS_PERCENT: float = 30.0     # close at -30% of the stake
+
     RSI_PERIOD: int = 14
 
     # Polymarket
@@ -203,6 +219,16 @@ def load_settings():
                 cor = config_data["close_on_reversal"]
                 if "enabled" in cor: base_settings.CLOSE_ON_REVERSAL_ENABLED = bool(cor["enabled"])
                 if "bars" in cor: base_settings.CLOSE_REVERSAL_BARS = int(cor["bars"])
+
+            if "take_profit" in config_data:
+                tp = config_data["take_profit"]
+                if "enabled" in tp: base_settings.TAKE_PROFIT_ENABLED = bool(tp["enabled"])
+                if "percent" in tp: base_settings.TAKE_PROFIT_PERCENT = float(tp["percent"])
+
+            if "stop_loss" in config_data:
+                sl = config_data["stop_loss"]
+                if "enabled" in sl: base_settings.STOP_LOSS_ENABLED = bool(sl["enabled"])
+                if "percent" in sl: base_settings.STOP_LOSS_PERCENT = float(sl["percent"])
 
             if "chainlink" in config_data:
                 cl = config_data["chainlink"]

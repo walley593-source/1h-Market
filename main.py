@@ -315,6 +315,95 @@ async def execute_trade(decision: Dict[str, Any], market_prices: Dict[str, Any],
                                 model_p=decision.get("model_p"))
 
 
+def _mark_open_positions(poly_snapshot: Dict[str, Any]):
+    """Mark every open position in the CURRENT market to market at its side's best BID —
+    the price a sell would actually get. Annotates each trade with:
+
+        mark_bid, unrealized_pnl, unrealized_pct   (% OF THE STAKE)
+
+    This is what the dashboard shows as the running trade's live P&L, and the same
+    numbers the TP/SL rule acts on. Runs every tick regardless of whether TP/SL is armed
+    or trading is running, so the P&L display is always live. Trades from *past* markets
+    (awaiting settlement) have no live book, so they are left un-marked."""
+    if not poly_snapshot.get("ok"):
+        return
+    ob_all = poly_snapshot.get("orderbook") or {}
+    mid = str((poly_snapshot.get("market") or {}).get("id"))
+    for t in state["active_trades"]:
+        if str(t.get("market_id")) != mid:
+            continue
+        ob = ob_all.get("up" if t.get("side") == "UP" else "down") or {}
+        bid = ob.get("bestBid")
+        amount, shares = t.get("amount"), t.get("shares")
+        if bid and bid > 0 and amount and amount > 0 and shares:
+            t["mark_bid"] = bid
+            t["unrealized_pnl"] = (shares * bid) - amount
+            t["unrealized_pct"] = t["unrealized_pnl"] / amount * 100.0
+
+
+def _equity() -> float:
+    """EQUITY = free cash + the mark-to-market value of every open position.
+
+    `state["paper_balance"]` is only the CASH left after the stake was debited, so while a
+    trade is open it understates what the account is actually worth. Equity adds the
+    positions back at their current bid (falling back to entry cost when a position has no
+    live mark, e.g. a past market awaiting settlement — never dropping it to zero)."""
+    equity = float(state["paper_balance"])
+    for t in state["active_trades"]:
+        bid, shares = t.get("mark_bid"), t.get("shares")
+        if bid and shares:
+            equity += shares * bid
+        else:
+            equity += float(t.get("amount") or 0)  # no live book: hold it at cost
+    return equity
+
+
+async def maybe_tp_sl(poly_snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """TAKE-PROFIT / STOP-LOSS on the running position, as a % of the amount staked.
+
+    Closes the position when its unrealized P&L (marked at the held side's best bid)
+    crosses +TAKE_PROFIT_PERCENT or -STOP_LOSS_PERCENT of the stake. Independent toggles.
+
+    This is a HARD RISK RULE and runs BEFORE the model/indicator exits — if the position
+    has already hit its profit target or its loss limit, that decision outranks anything
+    the model or the 1m reversal has to say. Sells into the book in live mode (via
+    _close_position), debits/credits the simulated balance in paper. The window stays
+    locked afterwards (one entry per window), so it will not re-enter.
+
+    Returns the tp/sl decision for the dashboard, or None when there's nothing to judge.
+    """
+    if not settings.TAKE_PROFIT_ENABLED and not settings.STOP_LOSS_ENABLED:
+        return None
+    if not state["active_trades"]:
+        return None
+
+    market = poly_snapshot["market"]
+    now_ts = time.time()
+    trade = next((t for t in state["active_trades"]
+                  if str(t.get("market_id")) == str(market.get("id"))
+                  and now_ts < (t.get("end_ts") or float("inf"))), None)
+    if trade is None:
+        return None
+
+    held_key = "up" if trade["side"] == "UP" else "down"
+    ob = (poly_snapshot.get("orderbook") or {}).get(held_key) or {}
+
+    decision = engines.decide_tp_sl({
+        "amount": trade.get("amount"),
+        "shares": trade.get("shares"),
+        "heldBid": ob.get("bestBid"),
+        "tpEnabled": settings.TAKE_PROFIT_ENABLED,
+        "tpPercent": settings.TAKE_PROFIT_PERCENT,
+        "slEnabled": settings.STOP_LOSS_ENABLED,
+        "slPercent": settings.STOP_LOSS_PERCENT,
+    })
+
+    if decision["action"] == "SELL":
+        await _close_position(trade, poly_snapshot.get("prices"), poly_snapshot.get("token_ids", {}),
+                              poly_snapshot.get("orderbook", {}), decision["reason"])
+    return decision
+
+
 async def _close_position(trade: Dict[str, Any], market_prices: Optional[Dict[str, Any]], token_ids: Optional[Dict[str, Any]], orderbook: Optional[Dict[str, Any]], reason: str) -> bool:
     """Sell out of `trade`, book its P/L and move it to history. Returns True on success,
     False if it couldn't be closed (no exit price / live sell failed). Used by both the
@@ -900,9 +989,18 @@ async def update_loop():
 
             # Trading actions only fire when the user has pressed Start. Data, prices
             # and the dashboard keep updating regardless so the balance view stays live.
+            # Mark open positions to the live book EVERY tick (independent of running /
+            # TP/SL), so the dashboard's per-trade P&L and Equity are always current.
+            _mark_open_positions(poly_snapshot)
+
             exec_result = None
+            tp_sl = None
             if poly_snapshot["ok"] and state["running"]:
                 exec_result = await execute_trade(decision, poly_snapshot["prices"], poly_snapshot["market"], target_open, poly_snapshot.get("token_ids", {}), poly_snapshot.get("orderbook", {}))
+                # TAKE-PROFIT / STOP-LOSS (% of stake) — a HARD RISK RULE, so it runs
+                # BEFORE the model/indicator exits: a hit target or breached loss limit
+                # outranks whatever the model or the 1m reversal wants to do.
+                tp_sl = await maybe_tp_sl(poly_snapshot)
                 # ML EXIT (model mode): the same P(up) decides whether to sell the held
                 # side early. Shadow by default — logs would-sell decisions without acting.
                 await maybe_ml_exit(ml_p_up, poly_snapshot)
@@ -947,13 +1045,20 @@ async def update_loop():
                 "market": poly_snapshot.get("market") if poly_snapshot["ok"] else None,
                 "trading_state": {
                     "mode": state["trading_mode"],
-                    "balance": state["paper_balance"],
+                    "balance": state["paper_balance"],   # free CASH (stake already debited)
+                    "equity": _equity(),                 # cash + open positions marked at bid
                     "running": state["running"],
                     "active_trades": state["active_trades"],
                     "history_count": len(state["trade_history"]),
                     "risk": {"type": settings.RISK_TYPE, "value": settings.RISK_VALUE},
                     "symbol": settings.SYMBOL,
-                    "strategy_mode": settings.STRATEGY_MODE
+                    "strategy_mode": settings.STRATEGY_MODE,
+                    "tp_sl": {
+                        "tp_enabled": settings.TAKE_PROFIT_ENABLED,
+                        "tp_percent": settings.TAKE_PROFIT_PERCENT,
+                        "sl_enabled": settings.STOP_LOSS_ENABLED,
+                        "sl_percent": settings.STOP_LOSS_PERCENT,
+                    }
                 },
                 "prices": {
                     "spot": spot_price,
@@ -1047,6 +1152,14 @@ async def get_settings():
         "close_on_reversal": {
             "enabled": settings.CLOSE_ON_REVERSAL_ENABLED,
             "bars": settings.CLOSE_REVERSAL_BARS
+        },
+        "take_profit": {
+            "enabled": settings.TAKE_PROFIT_ENABLED,
+            "percent": settings.TAKE_PROFIT_PERCENT
+        },
+        "stop_loss": {
+            "enabled": settings.STOP_LOSS_ENABLED,
+            "percent": settings.STOP_LOSS_PERCENT
         }
     }
 
@@ -1130,6 +1243,20 @@ async def post_settings(new_settings: Dict[str, Any]):
             settings.CLOSE_ON_REVERSAL_ENABLED = bool(c["enabled"])
         if "bars" in c:
             settings.CLOSE_REVERSAL_BARS = int(c["bars"])
+
+    if "take_profit" in new_settings:
+        tp = new_settings["take_profit"]
+        if "enabled" in tp:
+            settings.TAKE_PROFIT_ENABLED = bool(tp["enabled"])
+        if "percent" in tp:
+            settings.TAKE_PROFIT_PERCENT = float(tp["percent"])
+
+    if "stop_loss" in new_settings:
+        sl = new_settings["stop_loss"]
+        if "enabled" in sl:
+            settings.STOP_LOSS_ENABLED = bool(sl["enabled"])
+        if "percent" in sl:
+            settings.STOP_LOSS_PERCENT = float(sl["percent"])
 
     if "polymarket" in new_settings:
         p = new_settings["polymarket"]

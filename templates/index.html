@@ -165,18 +165,42 @@
             <div class="p-4 sm:p-6">
                 <!-- Active Trades -->
                 <div x-show="tab === 'active'">
+                    <!-- EQUITY = free cash + open positions marked at the live bid. While a
+                         trade is open the cash balance alone understates the account. -->
                     <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-2">
-                        <h3 class="text-lg sm:text-xl font-bold">Session Balance</h3>
-                        <span class="text-xl sm:text-2xl font-bold text-green-500" x-text="'$' + (data.trading_state?.balance?.toLocaleString() || '1,000')"></span>
+                        <div>
+                            <h3 class="text-lg sm:text-xl font-bold">Equity</h3>
+                            <p class="text-[10px] text-gray-500 uppercase tracking-wider">Cash + open positions (at bid)</p>
+                        </div>
+                        <div class="text-left sm:text-right">
+                            <span class="text-xl sm:text-2xl font-bold text-green-500"
+                                  x-text="'$' + (data.trading_state?.equity != null ? Number(data.trading_state.equity).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '-')"></span>
+                            <p class="text-[10px] text-gray-500 font-mono"
+                               x-text="'cash $' + (data.trading_state?.balance != null ? Number(data.trading_state.balance).toFixed(2) : '-')"></p>
+                        </div>
                     </div>
+
+                    <!-- TP/SL armed indicator: shows the live targets the open trade is judged against -->
+                    <div x-show="data.trading_state?.tp_sl?.tp_enabled || data.trading_state?.tp_sl?.sl_enabled"
+                         class="flex flex-wrap gap-2 mb-3 text-[10px] uppercase font-bold tracking-wider">
+                        <span x-show="data.trading_state?.tp_sl?.tp_enabled"
+                              class="px-2 py-1 rounded bg-green-900/40 text-green-400 border border-green-800"
+                              x-text="'TP +' + data.trading_state?.tp_sl?.tp_percent + '%'"></span>
+                        <span x-show="data.trading_state?.tp_sl?.sl_enabled"
+                              class="px-2 py-1 rounded bg-red-900/40 text-red-400 border border-red-800"
+                              x-text="'SL −' + data.trading_state?.tp_sl?.sl_percent + '%'"></span>
+                    </div>
+
                     <div class="overflow-x-auto -mx-4 sm:mx-0">
-                        <table class="w-full text-left min-w-[500px] sm:min-w-0">
+                        <table class="w-full text-left min-w-[620px] sm:min-w-0">
                             <thead>
                                 <tr class="text-gray-500 text-xs uppercase tracking-wider">
                                     <th class="px-4 py-2">Market</th>
                                     <th class="px-4 py-2">Side</th>
                                     <th class="px-4 py-2">Entry</th>
+                                    <th class="px-4 py-2">Bid</th>
                                     <th class="px-4 py-2">Shares</th>
+                                    <th class="px-4 py-2">Live P&amp;L</th>
                                     <th class="px-4 py-2 text-right">Status</th>
                                 </tr>
                             </thead>
@@ -186,12 +210,19 @@
                                         <td class="px-4 py-3 truncate max-w-[150px] sm:max-w-[200px]" x-text="trade.market_slug"></td>
                                         <td class="px-4 py-3 font-bold" :class="trade.side === 'UP' ? 'text-green-400' : 'text-red-400'" x-text="trade.side"></td>
                                         <td class="px-4 py-3 font-mono" x-text="(trade.entry_price * 100).toFixed(0) + '¢'"></td>
+                                        <td class="px-4 py-3 font-mono text-gray-400" x-text="trade.mark_bid != null ? (trade.mark_bid * 100).toFixed(0) + '¢' : '—'"></td>
                                         <td class="px-4 py-3 font-mono" x-text="trade.shares.toFixed(2)"></td>
+                                        <!-- Live unrealized P&L: $ and % OF THE STAKE (the number TP/SL fires on) -->
+                                        <td class="px-4 py-3 font-mono font-bold"
+                                            :class="trade.unrealized_pnl == null ? 'text-gray-600' : (trade.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400')"
+                                            x-text="trade.unrealized_pnl == null ? '—'
+                                                    : (trade.unrealized_pnl >= 0 ? '+' : '−') + '$' + Math.abs(trade.unrealized_pnl).toFixed(2)
+                                                      + '  (' + (trade.unrealized_pct >= 0 ? '+' : '−') + Math.abs(trade.unrealized_pct).toFixed(1) + '%)'"></td>
                                         <td class="px-4 py-3 text-right text-yellow-500 font-bold" x-text="trade.status"></td>
                                     </tr>
                                 </template>
                                 <tr x-show="!data.trading_state?.active_trades?.length">
-                                    <td colspan="5" class="py-6 text-center text-gray-600 italic text-xs">No active trades found. Looking for edge...</td>
+                                    <td colspan="7" class="py-6 text-center text-gray-600 italic text-xs">No active trades found. Looking for edge...</td>
                                 </tr>
                             </tbody>
                         </table>

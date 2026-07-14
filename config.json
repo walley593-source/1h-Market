@@ -25,9 +25,9 @@
   },
   "entry": {
     "max_price": 0.8,
-    "min_book_liquidity_usd": 20,
-    "min_entry_minute": 5,
-    "min_lead_bps": 3
+    "min_book_liquidity_usd": 20.0,
+    "min_entry_minute": 5.0,
+    "min_lead_bps": 3.0
   },
   "strategy": {
     "mode": "model",
@@ -41,6 +41,14 @@
   "close_on_reversal": {
     "enabled": false,
     "bars": 3
+  },
+  "take_profit": {
+    "enabled": false,
+    "percent": 30
+  },
+  "stop_loss": {
+    "enabled": false,
+    "percent": 30
   },
   "chainlink": {
     "polygon_rpc_url": "https://polygon.drpc.org",
